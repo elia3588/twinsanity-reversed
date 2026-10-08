@@ -29,3 +29,13 @@ __pycache__/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# The user's own game data, the SDL runtime, and the desktop port's scratch: logs, screenshots and texture dumps are debug
+# output the runs make, not part of the source
+/disc/
+/*.iso
+/SDL2.dll
+*.log
+shot*.png
+texdump*.rgba
+/stash.patch

@@ -179,7 +179,7 @@ SDL2_FETCHED = HERE / "build" / "sdl2" / SDL2_MINGW_FOLDER
 # own main (SDL_MAIN_HANDLED) and stays a console program
 SDL2_MAIN_FLAGS = ["-Dmain=SDL_main", "-lSDL2main", "-mwindows"]
 # The desktop's file using SDL2 (its window), built for the host's own layouts (DESKTOP_LAYOUT_FLAGS)
-SDL2_SOURCES = ["src/platform/desktop/window.cpp"]
+SDL2_SOURCES = ["src/platform/desktop/window.cpp", "src/platform/desktop/sdl_gfx.cpp", "src/platform/desktop/crash.cpp"]
 
 
 def sdl2_folder(windows):

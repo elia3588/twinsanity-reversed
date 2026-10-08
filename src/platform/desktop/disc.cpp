@@ -10,12 +10,12 @@ s32 Initialise()
 
 s32 SetMedia(Media media)
 {
+    (void)media;
     return 0;
 }
 
 Readiness WaitReady()
 {
-    return {};
+    return Ready;
 }
-
 }

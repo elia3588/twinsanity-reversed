@@ -2,6 +2,12 @@
 
 #include "common.h"
 
+#if defined(DESKTOP_SDL2)
+#include <SDL.h>
+#else
+struct SDL_Renderer;
+#endif
+
 // The desktop's window (SDL2): opened when the renderer starts, its events handled at every vertical blank (whether it was
 // closed), every frame presented in it, so far as its clear color, and closed when the program exits (before the exit: the GL
 // drivers' own exit handlers let go of what SDL's renderer would still call). Built without SDL2 there's none, and these do
@@ -13,4 +19,6 @@ void Open();
 bool HandleEvents();
 void Show(u8 red, u8 green, u8 blue);
 void Close();
+SDL_Renderer* GetRenderer();
+void Present();
 }
