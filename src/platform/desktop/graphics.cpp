@@ -8,6 +8,9 @@
 
 #include "game/context.h"
 #include "game/font.h"
+#include "game/gamecontroller.h" // TEMPORARY probe include
+#include "game/chunkloading.h"   // TEMPORARY probe include
+#include "game/controllers.h"    // TEMPORARY probe include
 #include "game/particles.h"
 #include "game/renderer.h"
 #include "game/resources.h"
@@ -23,6 +26,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <vector>
 
 // The desktop's side of Platform::Graphics: the window (window.cpp) with the frame's 2D drawn in it through SDL (sdl_gfx.cpp),
 // the game's own textures decoded from the disc (gs_texture.cpp). The 3D scene isn't drawn yet
@@ -36,6 +41,43 @@ bool g_LogStripVertexes = false;
 // The screen the game draws in, its pixel size (the shapes' places are pixels of it)
 s32 g_ScreenWidthPx = 512;
 s32 g_ScreenHeightPx = 512;
+
+// The frame's memory (AllocFrameMemory): a bump arena of chunks that live until the frame is drawn, then are let go (the PS2's
+// own is the frame buckets' DMA chain). A chunk never moves once made, so the pointers handed out stay valid
+constexpr size_t FrameMemoryChunk = 1u << 20;
+
+std::vector<std::unique_ptr<u8[]>> g_FrameMemory;
+size_t g_FrameMemoryChunk = 0;
+size_t g_FrameMemoryUsed = 0;
+
+void ResetFrameMemory()
+{
+    g_FrameMemory.clear();
+    g_FrameMemoryChunk = 0;
+    g_FrameMemoryUsed = 0;
+}
+
+u8* AllocFrameMemoryArena(size_t bytes)
+{
+    // The DMA tags the PS2's allocation must start a quadword into: keep the desktop's quadword aligned too
+    bytes = (bytes + 0xF) & ~static_cast<size_t>(0xF);
+    if (bytes == 0)
+    {
+        bytes = 0x10;
+    }
+
+    if (g_FrameMemory.empty() || g_FrameMemoryUsed + bytes > FrameMemoryChunk)
+    {
+        size_t chunk = bytes > FrameMemoryChunk ? bytes : FrameMemoryChunk;
+        g_FrameMemory.push_back(std::unique_ptr<u8[]>(new u8[chunk]));
+        g_FrameMemoryChunk = g_FrameMemory.size() - 1;
+        g_FrameMemoryUsed = 0;
+    }
+
+    u8* start = g_FrameMemory[g_FrameMemoryChunk].get() + g_FrameMemoryUsed;
+    g_FrameMemoryUsed += bytes;
+    return start;
+}
 
 // The graphics' trace of what it's given, while $TWINSANITY_GFX_LOG is set (to stderr, which the run's own does)
 void Log(const char* format, ...)
@@ -192,15 +234,21 @@ void WaitSent()
 
 void ResetBuckets(bool movie)
 {
+    // Nothing's still reading last frame's memory at a restart
+    (void)movie;
+    ResetFrameMemory();
 }
 
 void SubmitBuckets(bool fromInterrupt)
 {
+    // The frame is drawn: its memory starts over for the next
+    (void)fromInterrupt;
+    ResetFrameMemory();
 }
 
 void* AllocFrameMemory(u32 count, u32 size)
 {
-    return nullptr;
+    return AllocFrameMemoryArena(static_cast<size_t>(count) * size);
 }
 
 void FinishFrame()

@@ -3323,7 +3323,7 @@ f32 EllipsoidValue(EllipsoidPair* pair, f32 along)
     return (pair->point.x * direction.x + pair->point.y * direction.y + pair->point.z * direction.z) * along;
 }
 
-f32 NegativeEllipsoidValue(EllipsoidPair* pair, f32 along)
+f32 NegativeEllipsoidValue(f32 along, EllipsoidPair* pair)
 {
     return -EllipsoidValue(pair, along);
 }

@@ -537,7 +537,7 @@ extern "C"
     void EllipsoidProducts(EllipsoidPair* pair) RETAIL(FUN_00292500);
     void EllipsoidMatrices(EllipsoidPair* pair, const Matrix4x4* matrix, const Matrix4x4* otherMatrix) RETAIL(FUN_00292598);
     f32 EllipsoidValue(EllipsoidPair* pair, f32 along) RETAIL_N32(FUN_00290d38);
-    f32 NegativeEllipsoidValue(EllipsoidPair* pair, f32 along) RETAIL_N32(FUN_002924e0);
+    f32 NegativeEllipsoidValue(f32 along, EllipsoidPair* pair) RETAIL_N32(FUN_002924e0);
     u32 EllipsoidsApart(EllipsoidPair* pair, Vector4* separation, Vector4* other, const Matrix4x4* matrix,
                         const Matrix4x4* otherMatrix, u32 noDirection) RETAIL(FUN_002913a8);
 }

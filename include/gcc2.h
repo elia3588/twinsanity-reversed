@@ -20,6 +20,7 @@ inline Result CallVirtual(const void* object, const GccVTableEntry* vtable, u32 
 {
     const GccVTableEntry& entry = vtable[slot];
     void* self = const_cast<u8*>(static_cast<const u8*>(object)) + entry.delta;
+#if defined(_EE)
     // The vtables hold the retail functions (or thunks to C++), which take their floats the EABI's way
     if constexpr (Abi::IsMixed<void*, Args...>)
     {
@@ -29,6 +30,10 @@ inline Result CallVirtual(const void* object, const GccVTableEntry* vtable, u32 
     {
         return reinterpret_cast<Result (*)(void*, Args...)>(entry.function)(self, args...);
     }
+#else
+    // Elsewhere the entries are the C++ functions themselves, whose arguments are in their declaration's order
+    return reinterpret_cast<Result (*)(void*, Args...)>(entry.function)(self, args...);
+#endif
 }
 
 // A GCC 2.9x pointer to a data member: the member's offset plus 1, 0 being the null pointer

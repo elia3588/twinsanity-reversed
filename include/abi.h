@@ -2,6 +2,7 @@
 
 #include "common.h"
 
+#include <tuple>
 #include <type_traits>
 
 // The retail code passes arguments the way GCC 2.9x's EABI does: integers and pointers in $a0-$a7 in their order, floats in
@@ -250,11 +251,52 @@ inline void Pack(T value, u64* integers, u32& integerCount, f32* floats, u32& fl
     }
 }
 
+// The EABI's registers keep the integers and the floats apart, so the order between the two kinds in a call doesn't matter to
+// it. The host's calling convention has no such split, so a call through CallEabi is given one: every float, then every integer.
+// A function reached that way must take its own floats before its integers (a wrapper can order its parameters so)
+template <bool Keep, typename T>
+using KeptArgument = std::conditional_t<Keep, std::tuple<T>, std::tuple<>>;
+
+template <typename... Args>
+using FloatArguments = decltype(std::tuple_cat(std::declval<KeptArgument<IsFloat<Args>, Args>>()...));
+
+template <typename... Args>
+using IntegerArguments = decltype(std::tuple_cat(std::declval<KeptArgument<!IsFloat<Args>, Args>>()...));
+
+template <typename... Args>
+using OrderedArguments = decltype(std::tuple_cat(std::declval<FloatArguments<Args...>>(), std::declval<IntegerArguments<Args...>>()));
+
+template <typename Result, typename Arguments>
+struct ArgumentsFunction;
+
+template <typename Result, typename... Args>
+struct ArgumentsFunction<Result, std::tuple<Args...>>
+{
+    using Type = Result (*)(Args...);
+};
+
+template <bool Keep, typename T>
+inline auto KeptValue(T value)
+{
+    if constexpr (Keep)
+    {
+        return std::tuple<T>(value);
+    }
+    else
+    {
+        return std::tuple<>();
+    }
+}
+
 template <typename Result, typename... Args>
 inline Result CallEabi(const void* function, Args... args)
 {
 #if !defined(_EE)
-    return reinterpret_cast<Result (*)(Args...)>(const_cast<void*>(function))(args...);
+    auto floats = std::tuple_cat(KeptValue<IsFloat<Args>>(args)...);
+    auto integers = std::tuple_cat(KeptValue<!IsFloat<Args>>(args)...);
+    auto ordered = std::tuple_cat(floats, integers);
+    using Function = typename ArgumentsFunction<Result, OrderedArguments<Args...>>::Type;
+    return std::apply(reinterpret_cast<Function>(const_cast<void*>(function)), ordered);
 #else
     static_assert(sizeof...(Args) <= ArgumentRegisters, "arguments on the stack aren't passed");
     u64 integers[ArgumentRegisters]{};

@@ -113,12 +113,12 @@ public:
 
     bool Wants(ChunkLoader* loader)
     {
-        return CallVirtual<u32>(this, vtable, WantsSlot, loader) != 0;
+        return CallVirtual<bool>(this, vtable, WantsSlot, loader);
     }
 
     bool DoesNotWant(ChunkLoader* loader)
     {
-        return CallVirtual<u32>(this, vtable, DoesNotWantSlot, loader) != 0;
+        return CallVirtual<bool>(this, vtable, DoesNotWantSlot, loader);
     }
 };
 
@@ -189,44 +189,44 @@ public:
     // Start loading or unloading the file (the index of the policy): false when it can't yet. Continuing returns false when done
     bool StartLoading(s32 index, bool now)
     {
-        return CallVirtual<u32>(this, vtable, StartLoadingSlot, index, now) != 0;
+        return CallVirtual<bool>(this, vtable, StartLoadingSlot, index, now);
     }
 
     bool ContinueLoading(s32 index, bool now)
     {
-        return CallVirtual<u32>(this, vtable, ContinueLoadingSlot, index, now) != 0;
+        return CallVirtual<bool>(this, vtable, ContinueLoadingSlot, index, now);
     }
 
     bool StartUnloading(s32 index, bool now)
     {
-        return CallVirtual<u32>(this, vtable, StartUnloadingSlot, index, now) != 0;
+        return CallVirtual<bool>(this, vtable, StartUnloadingSlot, index, now);
     }
 
     bool ContinueUnloading(s32 index, bool now)
     {
-        return CallVirtual<u32>(this, vtable, ContinueUnloadingSlot, index, now) != 0;
+        return CallVirtual<bool>(this, vtable, ContinueUnloadingSlot, index, now);
     }
 
     // Whether the object is in the loader's chunk
     bool Holds(ReferencedObject* object)
     {
-        return CallVirtual<u32>(this, vtable, HoldsSlot, object) != 0;
+        return CallVirtual<bool>(this, vtable, HoldsSlot, object);
     }
 
     // Moves through the states. Returns whether it's busy (neither queued nor unloaded)
     bool Step(bool now)
     {
-        return (CallVirtual<u32>(this, vtable, StepSlot, now) & 0xFF) != 0;
+        return CallVirtual<bool>(this, vtable, StepSlot, now);
     }
 
     bool IsWanted()
     {
-        return CallVirtual<u32>(this, vtable, IsWantedSlot) != 0;
+        return CallVirtual<bool>(this, vtable, IsWantedSlot);
     }
 
     bool IsUnwanted()
     {
-        return CallVirtual<u32>(this, vtable, IsUnwantedSlot) != 0;
+        return CallVirtual<bool>(this, vtable, IsUnwantedSlot);
     }
 
     // The base's versions
