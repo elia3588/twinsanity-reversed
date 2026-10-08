@@ -14,9 +14,169 @@ namespace
 constexpr s32 WindowHeight = 720;
 constexpr s32 WindowWidth = WindowHeight * 4 / 3;
 
+// The PS2 pad's button word (g_TestPadButtons: its bits, pressed 1), which the desktop's keyboard and controller set
+constexpr u32 PadL2 = 0x0001;
+constexpr u32 PadR2 = 0x0002;
+constexpr u32 PadL1 = 0x0004;
+constexpr u32 PadR1 = 0x0008;
+constexpr u32 PadTriangle = 0x0010;
+constexpr u32 PadCircle = 0x0020;
+constexpr u32 PadCross = 0x0040;
+constexpr u32 PadSquare = 0x0080;
+constexpr u32 PadSelect = 0x0100;
+constexpr u32 PadL3 = 0x0200;
+constexpr u32 PadR3 = 0x0400;
+constexpr u32 PadStart = 0x0800;
+constexpr u32 PadUp = 0x1000;
+constexpr u32 PadRight = 0x2000;
+constexpr u32 PadDown = 0x4000;
+constexpr u32 PadLeft = 0x8000;
+// How far a stick has to be pushed for a direction to count as held
+constexpr s16 StickThreshold = 0x4000;
+
 bool g_Started = false;
 SDL_Window* g_Window = nullptr;
 SDL_Renderer* g_Renderer = nullptr;
+SDL_GameController* g_Controller = nullptr;
+u32 g_PadButtons = 0;
+
+// The keyboard's and the controller's buttons held, as the PS2 pad's button word
+u32 PollPad()
+{
+    const Uint8* keys = SDL_GetKeyboardState(nullptr);
+    u32 held = 0;
+    if (keys[SDL_SCANCODE_Z] || keys[SDL_SCANCODE_SPACE])
+    {
+        held |= PadCross;
+    }
+    if (keys[SDL_SCANCODE_X])
+    {
+        held |= PadCircle;
+    }
+    if (keys[SDL_SCANCODE_C])
+    {
+        held |= PadSquare;
+    }
+    if (keys[SDL_SCANCODE_V])
+    {
+        held |= PadTriangle;
+    }
+    if (keys[SDL_SCANCODE_Q] || keys[SDL_SCANCODE_1])
+    {
+        held |= PadL1;
+    }
+    if (keys[SDL_SCANCODE_2])
+    {
+        held |= PadL2;
+    }
+    if (keys[SDL_SCANCODE_E] || keys[SDL_SCANCODE_3])
+    {
+        held |= PadR1;
+    }
+    if (keys[SDL_SCANCODE_4])
+    {
+        held |= PadR2;
+    }
+    if (keys[SDL_SCANCODE_BACKSPACE] || keys[SDL_SCANCODE_ESCAPE])
+    {
+        held |= PadSelect;
+    }
+    if (keys[SDL_SCANCODE_RETURN])
+    {
+        held |= PadStart;
+    }
+    if (keys[SDL_SCANCODE_W] || keys[SDL_SCANCODE_UP])
+    {
+        held |= PadUp;
+    }
+    if (keys[SDL_SCANCODE_S] || keys[SDL_SCANCODE_DOWN])
+    {
+        held |= PadDown;
+    }
+    if (keys[SDL_SCANCODE_A] || keys[SDL_SCANCODE_LEFT])
+    {
+        held |= PadLeft;
+    }
+    if (keys[SDL_SCANCODE_D] || keys[SDL_SCANCODE_RIGHT])
+    {
+        held |= PadRight;
+    }
+
+    if (g_Controller != nullptr)
+    {
+        if (SDL_GameControllerGetButton(g_Controller, SDL_CONTROLLER_BUTTON_A))
+        {
+            held |= PadCross;
+        }
+        if (SDL_GameControllerGetButton(g_Controller, SDL_CONTROLLER_BUTTON_B))
+        {
+            held |= PadCircle;
+        }
+        if (SDL_GameControllerGetButton(g_Controller, SDL_CONTROLLER_BUTTON_X))
+        {
+            held |= PadSquare;
+        }
+        if (SDL_GameControllerGetButton(g_Controller, SDL_CONTROLLER_BUTTON_Y))
+        {
+            held |= PadTriangle;
+        }
+        if (SDL_GameControllerGetButton(g_Controller, SDL_CONTROLLER_BUTTON_LEFTSHOULDER))
+        {
+            held |= PadL1;
+        }
+        if (SDL_GameControllerGetButton(g_Controller, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER))
+        {
+            held |= PadR1;
+        }
+        if (SDL_GameControllerGetAxis(g_Controller, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > StickThreshold)
+        {
+            held |= PadL2;
+        }
+        if (SDL_GameControllerGetAxis(g_Controller, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > StickThreshold)
+        {
+            held |= PadR2;
+        }
+        if (SDL_GameControllerGetButton(g_Controller, SDL_CONTROLLER_BUTTON_BACK))
+        {
+            held |= PadSelect;
+        }
+        if (SDL_GameControllerGetButton(g_Controller, SDL_CONTROLLER_BUTTON_START))
+        {
+            held |= PadStart;
+        }
+        if (SDL_GameControllerGetButton(g_Controller, SDL_CONTROLLER_BUTTON_LEFTSTICK))
+        {
+            held |= PadL3;
+        }
+        if (SDL_GameControllerGetButton(g_Controller, SDL_CONTROLLER_BUTTON_RIGHTSTICK))
+        {
+            held |= PadR3;
+        }
+
+        if (SDL_GameControllerGetButton(g_Controller, SDL_CONTROLLER_BUTTON_DPAD_UP) ||
+            SDL_GameControllerGetAxis(g_Controller, SDL_CONTROLLER_AXIS_LEFTY) < -StickThreshold)
+        {
+            held |= PadUp;
+        }
+        if (SDL_GameControllerGetButton(g_Controller, SDL_CONTROLLER_BUTTON_DPAD_DOWN) ||
+            SDL_GameControllerGetAxis(g_Controller, SDL_CONTROLLER_AXIS_LEFTY) > StickThreshold)
+        {
+            held |= PadDown;
+        }
+        if (SDL_GameControllerGetButton(g_Controller, SDL_CONTROLLER_BUTTON_DPAD_LEFT) ||
+            SDL_GameControllerGetAxis(g_Controller, SDL_CONTROLLER_AXIS_LEFTX) < -StickThreshold)
+        {
+            held |= PadLeft;
+        }
+        if (SDL_GameControllerGetButton(g_Controller, SDL_CONTROLLER_BUTTON_DPAD_RIGHT) ||
+            SDL_GameControllerGetAxis(g_Controller, SDL_CONTROLLER_AXIS_LEFTX) > StickThreshold)
+        {
+            held |= PadRight;
+        }
+    }
+
+    return held;
+}
 }
 
 // Without a display (or SDL's video) the game goes on without a window
@@ -28,7 +188,7 @@ void DesktopWindow::Open()
     }
 
     SDL_SetMainReady();
-    if (SDL_Init(SDL_INIT_VIDEO) != 0)
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0)
     {
         std::fprintf(stderr, "No window: %s\n", SDL_GetError());
         return;
@@ -49,6 +209,19 @@ void DesktopWindow::Open()
     {
         std::fprintf(stderr, "Nothing shown in the window: %s\n", SDL_GetError());
     }
+
+    // A controller already plugged in (ones plugged in later come through the device events)
+    for (s32 device = 0; device < SDL_NumJoysticks(); device++)
+    {
+        if (SDL_IsGameController(device))
+        {
+            g_Controller = SDL_GameControllerOpen(device);
+            if (g_Controller != nullptr)
+            {
+                break;
+            }
+        }
+    }
 }
 
 bool DesktopWindow::HandleEvents()
@@ -61,8 +234,22 @@ bool DesktopWindow::HandleEvents()
         {
             closed = true;
         }
+        else if (event.type == SDL_CONTROLLERDEVICEADDED)
+        {
+            if (g_Controller == nullptr)
+            {
+                g_Controller = SDL_GameControllerOpen(event.cdevice.which);
+            }
+        }
+        else if (event.type == SDL_CONTROLLERDEVICEREMOVED && g_Controller != nullptr &&
+                 event.cdevice.which == SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(g_Controller)))
+        {
+            SDL_GameControllerClose(g_Controller);
+            g_Controller = nullptr;
+        }
     }
 
+    g_PadButtons = PollPad();
     return closed;
 }
 
@@ -92,6 +279,12 @@ void Present()
         SDL_RenderPresent(g_Renderer);
     }
 }
+
+// The buttons the desktop's own input held at the last HandleEvents
+u32 PadButtons()
+{
+    return g_PadButtons;
+}
 }
 
 void DesktopWindow::Close()
@@ -105,6 +298,12 @@ void DesktopWindow::Close()
     {
         SDL_DestroyRenderer(g_Renderer);
         g_Renderer = nullptr;
+    }
+
+    if (g_Controller != nullptr)
+    {
+        SDL_GameControllerClose(g_Controller);
+        g_Controller = nullptr;
     }
 
     if (g_Window != nullptr)
@@ -265,6 +464,11 @@ namespace DesktopWindow
 void Present()
 {
     // no-op stub
+}
+
+u32 PadButtons()
+{
+    return 0;
 }
 }
 #endif

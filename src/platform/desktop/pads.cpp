@@ -1,12 +1,56 @@
 #include "platform/pads.h"
 
 #include "debug.h"
+#include "window.h"
 
 #include "retail/libc.h"
 
-// Minimal desktop pad stub: a single stable pad at port 0, slot 0
+// Minimal desktop pad stub: a single stable pad at port 0, slot 0. It reports the buttons the desktop's own input holds
+// (DesktopWindow::PadButtons), plus the test runs' g_TestPadButtons
 namespace Platform::Pads
 {
+namespace
+{
+// The report's pressure bytes of the low byte's buttons and of the directions (bits 12-15), as the PS2's pad layer
+constexpr u32 PressureButtons = 8;
+constexpr u8 ButtonPressures[PressureButtons] = {PressureL2,       PressureR2,     PressureL1,    PressureR1,
+                                                 PressureTriangle, PressureCircle, PressureCross, PressureSquare};
+constexpr u32 FirstDirectionBit = 12;
+constexpr u32 Directions = 4;
+constexpr u8 DirectionPressures[Directions] = {PressureUp, PressureRight, PressureDown, PressureLeft};
+constexpr u8 FullPressure = 0xFF;
+constexpr u8 StickMiddle = 0x80;
+
+// The report a held button word (g_TestPadButtons: its bits) makes: its bytes, its button word (its high byte first), the
+// buttons' pressures and the sticks centered
+void FillReport(u8* data, u32 held)
+{
+    RetailLibc::MemorySet(data, 0, 21);
+    data[ReportButtonsHigh] = static_cast<u8>(~(held >> 8));
+    data[ReportButtonsLow] = static_cast<u8>(~held);
+    for (u32 bit = 0; bit < PressureButtons; bit++)
+    {
+        if ((held & (1u << bit)) != 0)
+        {
+            data[ButtonPressures[bit]] = FullPressure;
+        }
+    }
+
+    for (u32 direction = 0; direction < Directions; direction++)
+    {
+        if ((held & (1u << FirstDirectionBit) << direction) != 0)
+        {
+            data[DirectionPressures[direction]] = FullPressure;
+        }
+    }
+
+    data[StickRightX] = StickMiddle;
+    data[StickRightY] = StickMiddle;
+    data[StickLeftX] = StickMiddle;
+    data[StickLeftY] = StickMiddle;
+}
+}
+
 s32 Initialise()
 {
     return 0;
@@ -32,33 +76,8 @@ s32 Read(s32 port, s32 slot, u8* data)
     {
         return 0;
     }
-    RetailLibc::MemorySet(data, 0, 21);
-    u32 btn = 0;
-    // g_TestPadButtons is defined in debug.cpp; not exposed as extern here
-    // avoid pulling it in to prevent link issues
-    u8 low = 0xFF;
-    u8 high = 0xFF;
-    // Map basic buttons (approximate DS2 digital layout)
-    if (btn & (1u << 0)) low &= ~0x40; // Cross
-    if (btn & (1u << 1)) low &= ~0x20; // Circle
-    if (btn & (1u << 2)) low &= ~0x80; // Square
-    if (btn & (1u << 3)) low &= ~0x10; // Triangle
-    if (btn & (1u << 4)) high &= ~0x08; // Start
-    if (btn & (1u << 5)) high &= ~0x01; // Select
-    if (btn & (1u << 6)) high &= ~0x10; // Up
-    if (btn & (1u << 7)) high &= ~0x40; // Down
-    if (btn & (1u << 8)) high &= ~0x80; // Left
-    if (btn & (1u << 9)) high &= ~0x20; // Right
-    if (btn & (1u << 10)) low &= ~0x04; // L1
-    if (btn & (1u << 11)) low &= ~0x08; // L2
-    if (btn & (1u << 12)) low &= ~0x02; // R1
-    if (btn & (1u << 13)) low &= ~0x01; // R2
-    data[2] = low;
-    data[3] = high;
-    data[6] = 0x80;
-    data[7] = 0x80;
-    data[8] = 0x80;
-    data[9] = 0x80;
+
+    FillReport(data, g_TestPadButtons | DesktopWindow::PadButtons());
     return 1;
 }
 
@@ -84,17 +103,13 @@ s32 InfoMode(s32 port, s32 slot, ModeInfo info, s32 index)
     }
     if (info == InfoCurrentId)
     {
-        // DualShock 2 ID
-        return 0x5A;
+        // An analog DualShock (the game's analog setup path, which reads the pad)
+        return ModeIdAnalog;
     }
     if (info == InfoCurrentExtendedId)
     {
-        return 0x03; // analog pad extended
-    }
-    if (info == InfoModeTable)
-    {
-        // Return 1 to indicate success for mode table read
-        return 1;
+        // No extended mode: none that would override the current one
+        return 0;
     }
     return 0;
 }

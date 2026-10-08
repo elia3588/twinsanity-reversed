@@ -17,6 +17,9 @@ namespace DesktopWindow
 {
 void Open();
 bool HandleEvents();
+// The buttons held on the desktop's own input (keyboard and the first game controller), as the PS2 pad's button word
+// (g_TestPadButtons: its bits, pressed 1). Read after HandleEvents has polled the events
+u32 PadButtons();
 void Show(u8 red, u8 green, u8 blue);
 void Close();
 SDL_Renderer* GetRenderer();
