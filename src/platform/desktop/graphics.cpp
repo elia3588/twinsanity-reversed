@@ -8,9 +8,6 @@
 
 #include "game/context.h"
 #include "game/font.h"
-#include "game/gamecontroller.h" // TEMPORARY probe include
-#include "game/chunkloading.h"   // TEMPORARY probe include
-#include "game/controllers.h"    // TEMPORARY probe include
 #include "game/particles.h"
 #include "game/renderer.h"
 #include "game/resources.h"
@@ -470,12 +467,14 @@ void DrawSprite(Material* material, u32 colour, const Rectangle& place, const Re
 
     if (tex != nullptr && tex->sdlTexture != nullptr)
     {
-        SdlGfx::DrawTexture(tex->sdlTexture, screenX, screenY, screenWidth, screenHeight,
-                            static_cast<s32>(texturePlace.x * static_cast<f32>(tex->width)),
-                            static_cast<s32>(texturePlace.y * static_cast<f32>(tex->height)),
-                            static_cast<s32>(texturePlace.width * static_cast<f32>(tex->width)),
-                            static_cast<s32>(texturePlace.height * static_cast<f32>(tex->height)),
-                            red, green, blue, alpha);
+        // The texture's rows run bottom-up (the decoded image's row 0 is its bottom), so the area's rows are turned about
+        // within their rectangle to read top-down on the screen, as the font's glyphs do
+        SdlGfx::DrawTextureFlipped(tex->sdlTexture, screenX, screenY, screenWidth, screenHeight,
+                                   static_cast<s32>(texturePlace.x * static_cast<f32>(tex->width)),
+                                   static_cast<s32>(texturePlace.y * static_cast<f32>(tex->height)),
+                                   static_cast<s32>(texturePlace.width * static_cast<f32>(tex->width)),
+                                   static_cast<s32>(texturePlace.height * static_cast<f32>(tex->height)),
+                                   red, green, blue, alpha);
     }
     else
     {
@@ -1200,30 +1199,6 @@ void Font::Draw(const TextItem* item, TextPackets* /*packets*/)
     if (windowWidth <= 0 || windowHeight <= 0)
     {
         return;
-    }
-
-    static u32 drawn = 0;
-    drawn++;
-    if (drawn <= 3)
-    {
-        Log("Font::Draw #%u '%s' pos %.4f,%.4f scale %.4f,%.4f font %.4f,%.4f size %.4f,%.4f align %08X colour %08X lines %d height %.3f",
-            drawn, item->text, item->position.x, item->position.y, item->scale.x, item->scale.y, width, height, size.x, size.y,
-            item->alignment.value, item->colour, layout.lineCount, layout.height);
-        static bool dumped = false;
-        if (!dumped)
-        {
-            dumped = true;
-            const char samples[4] = {' ', 'a', 'A', 'g'};
-            for (u32 sample = 0; sample < 4; sample++)
-            {
-                u32 index = FontGlyphIndex(this, static_cast<u8>(samples[sample]));
-                const Vector4& glyph = glyphs[index];
-                u32 bits = *reinterpret_cast<const u32*>(&glyph.x);
-                u32 clear = bits & ~3u;
-                Log("glyph '%c' idx %u raw x,y,z,w %.5f,%.5f,%.5f,%.5f page %u texel left %.3f", samples[sample], index, glyph.x,
-                    glyph.y, glyph.z, glyph.w, bits & 3u, *reinterpret_cast<const f32*>(&clear) * kGlyphTexelScale);
-            }
-        }
     }
 
     // The layout's units are sixteenths of the renderer's pixels (as the PS2's text.cpp takes its places)
