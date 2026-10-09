@@ -220,6 +220,7 @@ PlaneTest TestPlanes(const PlaneColumns& planes, const Vector4& middle, const Ve
 {
     Vector4 reach = Weighed(planes.absoluteNormals, half);
     Vector4 distance = Sum(Weighed(planes.normals, middle), planes.offsets);
+
     // Very small epsilon on outside test only (distance + reach). No epsilon on crossing test.
     // With CullNear=0.05f, we're already very conservative.
     constexpr f32 Epsilon = 0.0001f;
