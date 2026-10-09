@@ -41,7 +41,10 @@ void Begin()
     glViewport(0, 0, g_Width, g_Height);
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
-    glOrtho(0.0, static_cast<double>(g_Width), static_cast<double>(g_Height), 0.0, -1.0, 1.0);
+    // The depth runs the same way as the 3D's own (0 nearest, 1 farthest): a vertex z of 0 lands on the frame's depth 0 and one
+    // of 1 on its 1, so the depth test keeps the nearest surface. With the usual (-1, 1) range the two would be the other way
+    // about and the far side of everything would be drawn (the scene looks inside out and see through)
+    glOrtho(0.0, static_cast<double>(g_Width), static_cast<double>(g_Height), 0.0, 0.0, -1.0);
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
     glDisable(GL_DEPTH_TEST);
