@@ -240,7 +240,7 @@ void GetSize(int* width, int* height)
     }
 }
 
-void Clear(u8 r, u8 g, u8 b)
+void Clear(u8 r, u8 g, u8 b, bool clearDepth)
 {
     if (!Ready())
     {
@@ -250,7 +250,12 @@ void Clear(u8 r, u8 g, u8 b)
     Begin();
     glDisable(GL_TEXTURE_2D);
     glClearColor(static_cast<GLclampf>(r) / 255.0f, static_cast<GLclampf>(g) / 255.0f, static_cast<GLclampf>(b) / 255.0f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    GLbitfield mask = GL_COLOR_BUFFER_BIT;
+    if (clearDepth)
+    {
+        mask |= GL_DEPTH_BUFFER_BIT;
+    }
+    glClear(mask);
 }
 
 void* CreateTexture(const void* rgba, int width, int height)

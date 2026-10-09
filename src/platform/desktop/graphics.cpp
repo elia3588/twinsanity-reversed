@@ -1094,7 +1094,8 @@ void StartFrame(const FrameStart& frame)
         g_ClearColor[2] = frame.blue;
     }
 
-    SdlGfx::Clear(g_ClearColor[0], g_ClearColor[1], g_ClearColor[2]);
+    // Always clear both color and depth at frame start (like PS2's frame setup)
+    SdlGfx::Clear(g_ClearColor[0], g_ClearColor[1], g_ClearColor[2], frame.clearDepth);
 }
 
 void UseHelperPrograms(u32 set, bool wait)
@@ -2750,8 +2751,8 @@ void DrawChunkSky(Sky* sky, RenderView* view)
 {
     // A chunk with a sky doesn't set its frame up through SetUpFrame (on the PS2 the sky's own half-size buffer replaces that
     // setup, renderer/sky.cpp): this is where the frame is cleared. Without it nothing clears between frames and each one smears
-    // over the last
-    SdlGfx::Clear(g_ClearColor[0], g_ClearColor[1], g_ClearColor[2]);
+    // over the last. Clear BOTH color and depth (sky replaces the frame setup entirely).
+    SdlGfx::Clear(g_ClearColor[0], g_ClearColor[1], g_ClearColor[2], true);
 
     auto* desktop = reinterpret_cast<DesktopGraphics::Sky*>(sky);
     if (desktop == nullptr || desktop->models == nullptr || view == nullptr)

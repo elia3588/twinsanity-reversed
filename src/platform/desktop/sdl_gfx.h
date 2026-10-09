@@ -7,7 +7,7 @@ namespace SdlGfx
 {
 bool Available();
 void GetSize(s32* width, s32* height);
-void Clear(u8 red, u8 green, u8 blue);
+void Clear(u8 red, u8 green, u8 blue, bool clearDepth = true);
 // A texture the decoded image's RGBA bytes make (one pixel's red, green, blue and alpha in that order), the handle nullptr when
 // there's no window or the texture couldn't be made
 void* CreateTexture(const void* rgba, s32 width, s32 height);
