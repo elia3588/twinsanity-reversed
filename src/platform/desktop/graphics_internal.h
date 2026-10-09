@@ -78,7 +78,8 @@ struct MaterialResource
 
 // A submodel's packet decoded into host geometry (the VU1 programmes' vertexes): the strips it's cut into (each a triangle strip,
 // a run of the arrays below) and the arrays every strip shares. The positions and normals are in the model's space; the texture
-// coordinates and colours are what the programme unpacks into VU1's addresses 4 and 6
+// coordinates and colours are what the programme unpacks into VU1's addresses 4 and 6. The noDraw array mirrors the GS ADC bit
+// from the UV/color unpack's fourth component (address 4): when set, the triangle ending at that vertex is not drawn.
 struct DecodedSubModel
 {
     u32 vertexCount;
@@ -89,6 +90,7 @@ struct DecodedSubModel
     Vector4* normals;
     Vector2* textureCoordinates;
     u32* colours;
+    u8* noDraw;        // one a vertex: the UV/color unpack's ADC bit (address 4, component 3, bit 15), the vertex draws no triangle
 };
 
 // A skin submodel's packet decoded into host geometry (the VU1 skinning programme's vertexes): the strips it's cut into (each a

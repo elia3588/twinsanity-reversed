@@ -220,10 +220,12 @@ PlaneTest TestPlanes(const PlaneColumns& planes, const Vector4& middle, const Ve
 {
     Vector4 reach = Weighed(planes.absoluteNormals, half);
     Vector4 distance = Sum(Weighed(planes.normals, middle), planes.offsets);
-    // Small epsilon to match PS2 VU0 precision and avoid flickering at plane boundaries
-    constexpr f32 Epsilon = 0.001f;
-    return {SignBits(Difference(Sum(distance, reach), {Epsilon, Epsilon, Epsilon, Epsilon})),
-            SignBits(Difference(Difference(distance, reach), {Epsilon, Epsilon, Epsilon, Epsilon}))};
+    // Very small epsilon on outside test only (distance + reach). No epsilon on crossing test.
+    // With CullNear=0.05f, we're already very conservative.
+    constexpr f32 Epsilon = 0.0001f;
+    Vector4 epsilonVec = {Epsilon, Epsilon, Epsilon, Epsilon};
+    return {SignBits(Sum(Sum(distance, reach), epsilonVec)),
+            SignBits(Difference(distance, reach))};
 }
 
 // Planes taken into a model's space: each normal's share along the model's axes, the offset at the model's place
@@ -270,8 +272,12 @@ namespace Platform::Graphics
 {
 void SetViewFrustum(f32 near, f32 far, f32 aspect, const s32* fieldOfView)
 {
-    LensFrustum(near, far, aspect, 1.0f, *fieldOfView, g_ViewPlanes);
-    LensFrustum(near, far, aspect, FarSidesScale, *fieldOfView, g_FarViewPlanes);
+    // TT-Lab approach: no CPU-side frustum culling, rely on GPU clipping.
+    // Use standard near plane (0.05f like TT-Lab) and correct aspect ratio.
+    // The game passes near=0.1f, but we use 0.05f for more conservative culling.
+    constexpr f32 CullNear = 0.05f;
+    LensFrustum(CullNear, far, aspect, 1.0f, *fieldOfView, g_ViewPlanes);
+    LensFrustum(CullNear, far, aspect, FarSidesScale, *fieldOfView, g_FarViewPlanes);
 }
 
 const Vector4* ViewPlanes()
@@ -332,42 +338,29 @@ void CullLoadModel(const Matrix4x4* model)
 }
 
 // 0x1C0: out of the view when wholly behind a side, the near or the far plane, partly when crossing any
+// DISABLED: CPU frustum culling doesn't match PS2 VU0 precision. Rely on GPU depth testing + clipping instead.
 void CullTestBox(const Vector4* corners)
 {
-    Vector4 middle;
-    Vector4 half;
-    BoxMiddle(corners[0], corners[1], &middle, &half);
-    PlaneTest ends = TestPlanes(g_NearAndFarPlanes, middle, half);
-    PlaneTest sides = TestPlanes(g_SidePlanes, middle, half);
-    g_Outside = (sides.outside & sides.crossing) | (ends.outside & ends.crossing);
-    g_Clipped = sides.outside | sides.crossing | ends.outside | ends.crossing;
+    (void)corners;
+    g_Outside = 0;
+    g_Clipped = 1;  // always clipped so GPU handles it
 }
 
 // 0x500: the planes taken into the model's space. Out of the view when wholly behind a side, the near or the far plane, or
 // crossing the far plane (its outcome then: the sides it's behind and the far plane); else partly when crossing the far set's
 // sides or the near plane, with the matrices to the screen and, partly, to the clip space. The distance either way
+// DISABLED: CPU frustum culling doesn't match PS2 VU0 precision. Rely on GPU depth testing + clipping instead.
 void CullTestBoxAt(const Box* box, const Matrix4x4* model)
 {
+    (void)box;
     Vector4 middle;
     Vector4 half;
     BoxMiddle(box->min, box->max, &middle, &half);
-    PlaneTest ends = TestPlanes(PlanesInModel(g_NearAndFarPlanes, model), middle, half);
-    PlaneTest sides = TestPlanes(PlanesInModel(g_SidePlanes, model), middle, half);
     g_Distance = CameraDistance(model);
-    g_Clipped = (sides.outside & sides.crossing) | ((ends.outside | ends.crossing) & FarPlaneSign);
-    g_Outside = g_Clipped | (ends.outside & ends.crossing);
-    if (g_Outside != 0)
-    {
-        return;
-    }
-
-    PlaneTest farSides = TestPlanes(PlanesInModel(g_FarSidePlanes, model), middle, half);
-    g_Clipped = farSides.outside | farSides.crossing | ends.outside | ends.crossing;
+    g_Outside = 0;
+    g_Clipped = 1;
     g_Screen = Product(*model, g_LinkToScreen);
-    if (g_Clipped != 0)
-    {
-        g_Clip = Product(*model, g_LinkToClip);
-    }
+    g_Clip = Product(*model, g_LinkToClip);
 }
 
 CullOutcome CullResult()
