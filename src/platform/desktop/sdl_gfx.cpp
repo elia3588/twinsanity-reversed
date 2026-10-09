@@ -374,12 +374,44 @@ void DrawTriangleStrip3D(void* handle, const Vertex3D* vertices, u32 count, bool
     }
     else
     {
+        // The PS2 GS discards degenerate triangles (where two vertices coincide). GL renders them,
+        // so we skip vertices that would form a degenerate triangle with the previous two.
         glBegin(GL_TRIANGLE_STRIP);
+        f32 prevX = 0.0f, prevY = 0.0f, prevZ = 0.0f;
+        f32 prev2X = 0.0f, prev2Y = 0.0f, prev2Z = 0.0f;
+        u32 emitted = 0;
+        constexpr f32 DegenerateEps = 0.01f;   // sub-pixel tolerance
         for (u32 vertex = 0; vertex < count; vertex++)
         {
-            glColor4ub(vertices[vertex].red, vertices[vertex].green, vertices[vertex].blue, vertices[vertex].alpha);
-            glTexCoord2f(vertices[vertex].u, vertices[vertex].v);
-            glVertex3f(vertices[vertex].x, vertices[vertex].y, vertices[vertex].z);
+            const Vertex3D& v = vertices[vertex];
+            bool degenerate = false;
+            if (emitted >= 2)
+            {
+                // Check if this vertex forms a degenerate triangle with the previous two
+                f32 dx1 = v.x - prevX;
+                f32 dy1 = v.y - prevY;
+                f32 dz1 = v.z - prevZ;
+                f32 dx2 = prevX - prev2X;
+                f32 dy2 = prevY - prev2Y;
+                f32 dz2 = prevZ - prev2Z;
+                // Degenerate if any edge is near-zero (two vertices coincide)
+                if ((dx1 * dx1 + dy1 * dy1 + dz1 * dz1) < DegenerateEps ||
+                    (dx2 * dx2 + dy2 * dy2 + dz2 * dz2) < DegenerateEps ||
+                    (v.x - prev2X) * (v.x - prev2X) + (v.y - prev2Y) * (v.y - prev2Y) + (v.z - prev2Z) * (v.z - prev2Z) < DegenerateEps)
+                {
+                    degenerate = true;
+                }
+            }
+
+            if (!degenerate)
+            {
+                glColor4ub(v.red, v.green, v.blue, v.alpha);
+                glTexCoord2f(v.u, v.v);
+                glVertex3f(v.x, v.y, v.z);
+                prev2X = prevX; prev2Y = prevY; prev2Z = prevZ;
+                prevX = v.x; prevY = v.y; prevZ = v.z;
+                emitted++;
+            }
         }
         glEnd();
     }
