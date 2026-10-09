@@ -116,6 +116,35 @@ DesktopGraphics::Texture* MaterialTexture(const DesktopGraphics::Material* mater
     return &material->shaders[0]->texture->texture;
 }
 
+// The material's first shader's settings put to the 3D drawer's own state (SdlGfx::Material3D): its blending and its preset,
+// its alpha test and its depth test and write, so an opaque shader writes its colour as it is, a blended one mixes it and an
+// alpha-tested one drops its samples (the PS2's GS reads the same settings)
+void SetMaterialState(const DesktopGraphics::Material* material)
+{
+    SdlGfx::Material3D state = {};
+    state.depthTest = 2;   // gequal, the usual opaque test (the GS's own number, the host's lequal)
+    if (material != nullptr && material->shaderCount != 0 && material->shaders[0] != nullptr)
+    {
+        const u8* settings = material->shaders[0]->settings;
+        state.blends = settings[0];
+        state.preset = settings[1];
+        state.alphaTest = settings[2];
+        state.alphaMethod = settings[3];
+        state.alphaReference = settings[4];
+        state.alphaFail = settings[5];
+        state.depthTest = settings[8];
+        state.ownAlpha = settings[17];
+        state.alphaA = settings[18];
+        state.alphaB = settings[19];
+        state.alphaC = settings[20];
+        state.alphaD = settings[21];
+        state.alphaFix = settings[22];
+        state.noDepthWrites = settings[27];
+    }
+
+    SdlGfx::SetMaterial3D(state);
+}
+
 // The UI's flat material (untextured, white) and its one shader, made once
 DesktopGraphics::Material g_FlatMaterial;
 DesktopGraphics::Shader g_FlatShader;
@@ -1732,6 +1761,7 @@ void DrawRigidModelToScreen(RigidModel* model, const Matrix4x4* toScreen, bool w
 
         DesktopGraphics::Texture* texture = MaterialTexture(material);
         DesktopGraphics::DecodedSubModel* decoded = DecodedSubModelOf(decodedModel, subModel);
+        SetMaterialState(material);
         DrawDecodedSubModel(decoded, texture != nullptr ? texture->sdlTexture : nullptr, toScreen, writeDepth);
     }
 }
@@ -1777,6 +1807,7 @@ void DrawSkin(Skin* skin, const Matrix4x4* joints, u32 jointCount, const Matrix4
 
         DesktopGraphics::Texture* texture = MaterialTexture(material);
         DesktopGraphics::DecodedSkinSubModel* decoded = DecodedSkinSubModelOf(desktop, subModel);
+        SetMaterialState(material);
         DrawDecodedSkinSubModel(decoded, texture != nullptr ? texture->sdlTexture : nullptr, &toScreen, joints, jointCount);
     }
 
@@ -1814,6 +1845,7 @@ void DrawBlendSkin(BlendSkin* skin, const Matrix4x4* joints, u32 jointCount, con
 
         DesktopGraphics::Texture* texture = MaterialTexture(material);
         void* sdlTexture = texture != nullptr ? texture->sdlTexture : nullptr;
+        SetMaterialState(material);
 
         for (u32 partIndex = 0; partIndex < sub->count; partIndex++)
         {

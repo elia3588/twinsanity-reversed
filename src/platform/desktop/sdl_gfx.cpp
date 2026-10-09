@@ -49,6 +49,9 @@ void Begin()
     glLoadIdentity();
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
+    // The 2D always draws with every sample: a 3D draw's material may have left its alpha test on (the 3D drawers set their own
+    // again after Begin)
+    glDisable(GL_ALPHA_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 }
@@ -107,6 +110,115 @@ void BindTexture(const Texture* texture, bool repeat = false)
     {
         glDisable(GL_TEXTURE_2D);
     }
+}
+
+// The material the 3D drawers last set (SetMaterial3D), the plain state until one does
+Material3D g_Material3D = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0};
+
+// The GS's ATST as the host's alpha function
+GLenum AlphaFunc3D(u32 method)
+{
+    switch (method)
+    {
+    case 0:
+        return GL_NEVER;
+    case 1:
+        return GL_ALWAYS;
+    case 2:
+        return GL_LESS;
+    case 3:
+        return GL_LEQUAL;
+    case 4:
+        return GL_EQUAL;
+    case 5:
+        return GL_GEQUAL;
+    case 6:
+        return GL_GREATER;
+    case 7:
+        return GL_NOTEQUAL;
+    }
+
+    return GL_ALWAYS;
+}
+
+// The GS's ZTST as the host's: the GS's depth runs the other way about (its 0 is the far plane, the window's 0 the near one), so
+// the usual gequal is the host's lequal and greater the host's less
+GLenum DepthFunc3D(u32 method)
+{
+    switch (method)
+    {
+    case 0:
+        return GL_NEVER;
+    case 1:
+        return GL_ALWAYS;
+    case 3:
+        return GL_LESS;
+    }
+
+    return GL_LEQUAL;
+}
+
+// The blend the material's preset asks for: the GS ALPHA formulas InitAlphaPresets writes, as the host's source and destination
+// factors (its own formula is rare and falls back to the mix)
+void ApplyBlend3D()
+{
+    if (g_Material3D.ownAlpha != 0)
+    {
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        return;
+    }
+
+    switch (g_Material3D.preset)
+    {
+    case 1:   // add: source·sourceAlpha + destination
+    case 3:   // brighten (as close as the host's factors reach)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+        return;
+    case 4:   // darken: destination·(1 - sourceAlpha)
+        glBlendFunc(GL_ZERO, GL_ONE_MINUS_SRC_ALPHA);
+        return;
+    case 5:   // scale: destination·sourceAlpha
+        glBlendFunc(GL_ZERO, GL_SRC_ALPHA);
+        return;
+    }
+
+    // The mix, and everything else (the presets past the table's own: the source as it is)
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+}
+
+// The material's own state over the 2D one Begin leaves: whether it blends and how, its alpha test, and its depth test and write
+void ApplyMaterial3D(bool writeDepth)
+{
+    if (g_Material3D.blends != 0)
+    {
+        glEnable(GL_BLEND);
+        ApplyBlend3D();
+    }
+    else
+    {
+        glDisable(GL_BLEND);
+    }
+
+    if (g_Material3D.alphaTest != 0)
+    {
+        // The GS's alpha and its reference are the game's convention, full at 128 (the window's samples full at 1)
+        GLclampf reference = static_cast<GLclampf>(g_Material3D.alphaReference) / 128.0f;
+        if (reference > 1.0f)
+        {
+            reference = 1.0f;
+        }
+
+        glEnable(GL_ALPHA_TEST);
+        glAlphaFunc(AlphaFunc3D(g_Material3D.alphaMethod), reference);
+    }
+    else
+    {
+        glDisable(GL_ALPHA_TEST);
+    }
+
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(DepthFunc3D(g_Material3D.depthTest));
+    glDepthMask(writeDepth && g_Material3D.noDepthWrites == 0 ? GL_TRUE : GL_FALSE);
 }
 }
 
@@ -221,6 +333,11 @@ void DrawTriangleStrip(void* handle, const Vertex* vertices, u32 count)
     glDisable(GL_TEXTURE_2D);
 }
 
+void SetMaterial3D(const Material3D& material)
+{
+    g_Material3D = material;
+}
+
 void DrawTriangleStrip3D(void* handle, const Vertex3D* vertices, u32 count, bool writeDepth, const u8* noDraw)
 {
     if (!Ready() || vertices == nullptr || count < 3)
@@ -229,10 +346,9 @@ void DrawTriangleStrip3D(void* handle, const Vertex3D* vertices, u32 count, bool
     }
 
     Begin();
-    // The 2D's ortho projection keeps the window's pixels; the depth test is what the 3D needs (z 0 nearest, 1 farthest)
-    glEnable(GL_DEPTH_TEST);
-    glDepthFunc(GL_LEQUAL);
-    glDepthMask(writeDepth ? GL_TRUE : GL_FALSE);
+    // The 2D's ortho projection keeps the window's pixels; the material's own blending, alpha test and depth test then go over
+    // the 2D state Begin leaves (z 0 nearest, 1 farthest)
+    ApplyMaterial3D(writeDepth);
     BindTexture(static_cast<const Texture*>(handle), true);
     // A vertex whose no-draw flag is set takes no triangle: the triangle it would have closed with the two before it is left out,
     // the strip's own winding kept exactly (GL_TRIANGLES emits each kept triangle with the same vertex order)

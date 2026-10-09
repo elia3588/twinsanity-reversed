@@ -43,6 +43,29 @@ struct Vertex3D
     f32 u;
     f32 v;
 };
+// A 3D draw's material: the shader's own GS setting bytes (its blending and alpha preset, or its own alpha formula, its alpha
+// test and its depth test). The game's 3D drawers set it from each submodel's material before its strips are drawn; every
+// DrawTriangleStrip3D applies the last one it was given
+struct Material3D
+{
+    u8 blends;           // the GS's ABE: whether the source blends with the frame at all
+    u8 preset;           // the alpha preset (the GS ALPHA formula) when it blends
+    u8 ownAlpha;         // the shader's own alpha formula rather than the preset
+    u8 alphaA;
+    u8 alphaB;
+    u8 alphaC;
+    u8 alphaD;
+    u8 alphaFix;
+    u8 alphaTest;        // the GS's ATE
+    u8 alphaMethod;      // the GS's ATST
+    u8 alphaReference;   // the GS's AREF
+    u8 alphaFail;        // the GS's AFAIL (the desktop drops the fragment whatever it is)
+    u8 depthTest;        // the GS's ZTST (0 never, 1 always, 2 gequal, 3 greater)
+    u8 noDepthWrites;    // the GS's ZMSK: the depth is kept even when the draw would write it
+};
+// The material the following DrawTriangleStrip3D calls draw with. The game's own draw calls it per submodel; without a call the
+// plain state (opaque, no alpha test, the usual nearest depth test) holds
+void SetMaterial3D(const Material3D& material);
 // The same strip as DrawTriangleStrip, over triangles that depth-test against each other and against the frame's depth.
 // The depth isn't written when writeDepth is clear: a background (a sky) tests against the frame's depth without ever hiding
 // what's drawn after it. When noDraw isn't nullptr it holds one flag a vertex: the PS2's GS draws no triangle for a vertex whose
