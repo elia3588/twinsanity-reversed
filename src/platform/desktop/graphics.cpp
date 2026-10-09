@@ -998,8 +998,45 @@ void MoveDisplay(const Vector2* offset)
 {
 }
 
+// The materials' animations stepped by the game's clock (its materials' shaders and the particles' waves)
 void StepAnimations(const TimeClock* clock)
 {
+    (void)clock;
+    // Frame time in seconds (60 FPS fixed)
+    constexpr f32 seconds = 1.0f / 60.0f;
+    if (seconds <= 0.0f)
+    {
+        return;
+    }
+
+    // Iterate through all materials in the material table
+    for (u32 i = 0; i < g_MaterialTable.count; i++)
+    {
+        DesktopGraphics::MaterialResource* resource = reinterpret_cast<DesktopGraphics::MaterialResource*>(g_MaterialTable.entries[i].item);
+        if (resource != nullptr && resource->material != nullptr)
+        {
+            DesktopGraphics::Material* material = resource->material;
+            for (u32 j = 0; j < material->shaderCount; j++)
+            {
+                DesktopGraphics::Shader* shader = material->shaders[j];
+                if (shader != nullptr && shader->animation != nullptr)
+                {
+                    // Advance the shader animation by the frame time
+                    AdvanceShaderAnimation(shader->animation, 1.0f / 60.0f);
+
+                    // Update UV scroll offsets from animation (settings[15]=uScroll, settings[16]=vScroll)
+                    if (shader->settings[15] == 1)  // uScroll == ScrollAnimated
+                    {
+                        shader->scroll[0] = shader->animation->uvOffset.x;
+                    }
+                    if (shader->settings[16] == 1)  // vScroll == ScrollAnimated
+                    {
+                        shader->scroll[1] = shader->animation->uvOffset.y;
+                    }
+                }
+            }
+        }
+    }
 }
 
 // The matrix from clip space to the GS's own coordinates (16ths of a pixel, the screen's middle at 2048), which the game's view
