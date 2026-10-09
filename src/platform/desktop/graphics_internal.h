@@ -169,6 +169,8 @@ struct BlendPart
     u8 shapeCount;
     f32 shapeFactors[3];
     u32 packetSize;
+    u32 vertexCount;
+    DecodedSkinSubModel* decoded;
 };
 
 struct BlendSubModel

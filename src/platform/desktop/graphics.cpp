@@ -703,6 +703,17 @@ DesktopGraphics::DecodedSkinSubModel* DecodedSkinSubModelOf(DesktopGraphics::Ski
     return skin->decoded[subModel];
 }
 
+// A blend part's decode (its packet the same skin packet a skin submodel's is), made once and kept on the part (graphics_internal.h)
+DesktopGraphics::DecodedSkinSubModel* DecodedBlendPartOf(DesktopGraphics::BlendPart* part)
+{
+    if (part->decoded == nullptr && part->packet != nullptr && part->vertexCount != 0)
+    {
+        part->decoded = DecodeSkinSubModel(part->packet, part->packetSize, part->vertexCount);
+    }
+
+    return part->decoded;
+}
+
 // A material's shaders' animations started again (a model's materials are the game's own, graphics_internal.h's)
 void RestartMaterialAnimations(DesktopGraphics::MaterialResource* resource)
 {
@@ -793,10 +804,11 @@ void ReadBlendPart(DesktopGraphics::BlendPart* part, Stream* stream, u32 shapeCo
     std::memset(part, 0, sizeof(DesktopGraphics::BlendPart));
 
     s32 packetSize = 0;
-    s32 unused = 0;
+    s32 vertexCount = 0;
     stream->ReadS32(&packetSize);
-    stream->ReadS32(&unused);
+    stream->ReadS32(&vertexCount);
     part->packetSize = static_cast<u32>(packetSize);
+    part->vertexCount = static_cast<u32>(vertexCount);
     part->packet = ReadPacketBytes(stream, part->packetSize);
 
     stream->Read(part->shapeFactors, sizeof(part->shapeFactors), 1);
@@ -872,6 +884,8 @@ void DestroyBlendSubModel(DesktopGraphics::BlendSubModel* subModel)
         {
             MemoryDeallocate2_(part->shapeCounts);
         }
+
+        FreeDecodedSkinSubModel(part->decoded);
 
         MemoryDeallocate2_(part);
     }
@@ -1522,11 +1536,24 @@ void DrawDecodedSubModel(DesktopGraphics::DecodedSubModel* decoded, void* textur
     }
 }
 
+// A blend skin's own deformations of a part's vertexes: the offsets one of the part's shapes holds for each of them (four signed
+// bytes a vertex: its X, Y and Z in blend shape units), and the shapes the OGI's animation weighs this frame
+struct BlendShapeState
+{
+    const u32* counts;       // per shape: how many vertexes its offsets hold
+    u8* const* addresses;    // per shape: the offsets, four signed bytes a vertex
+    const f32* factors;      // the part's blend shape scale, a component a word (the offsets are its units)
+    const f32* weights;      // how much of each active shape this frame
+    const s32* shapes;       // which shapes are active
+    s32 shapeCount;          // how many are active
+    u32 shapeTotal;          // how many the part has
+};
+
 // One decoded skin submodel's strips drawn: each vertex is blended by its joints (the VU1 skinning programme's own work) into the
 // model's space, then taken to the GS's coordinates and the window's pixels and the game screen's, and drawn depth-tested. A strip
 // wholly in front of the camera is drawn in one go; one crossing the camera's own plane is clipped to it triangle by triangle
 void DrawDecodedSkinSubModel(DesktopGraphics::DecodedSkinSubModel* decoded, void* texture, const Matrix4x4* toScreen,
-                             const Matrix4x4* joints, u32 jointCount, bool writeDepth = true)
+                             const Matrix4x4* joints, u32 jointCount, bool writeDepth = true, const BlendShapeState* blend = nullptr)
 {
     if (decoded == nullptr || toScreen == nullptr || decoded->vertexCount == 0)
     {
@@ -1565,9 +1592,29 @@ void DrawDecodedSkinSubModel(DesktopGraphics::DecodedSkinSubModel* decoded, void
         for (u32 index = 0; index < count; index++)
         {
             u32 vertex = decoded->stripStarts[strip] + index;
-            const Vector4& bind = decoded->positions[vertex];
+            Vector4 base = decoded->positions[vertex];
+            if (blend != nullptr)
+            {
+                // The shape offsets are added to the bind pose before the joints blend it (the VU1's own order)
+                for (s32 shape = 0; shape < blend->shapeCount; shape++)
+                {
+                    s32 shapeIndex = blend->shapes[shape];
+                    if (shapeIndex < 0 || static_cast<u32>(shapeIndex) >= blend->shapeTotal ||
+                        blend->addresses[shapeIndex] == nullptr || vertex >= blend->counts[shapeIndex])
+                    {
+                        continue;
+                    }
+
+                    const s8* offset = reinterpret_cast<const s8*>(blend->addresses[shapeIndex]) + vertex * 4;
+                    f32 weight = blend->weights[shape];
+                    base.x += weight * offset[0] * blend->factors[0];
+                    base.y += weight * offset[1] * blend->factors[1];
+                    base.z += weight * offset[2] * blend->factors[2];
+                }
+            }
+
             u8 amount = decoded->jointAmounts[vertex];
-            Vector4 posed = bind;
+            Vector4 posed = base;
             if (joints != nullptr)
             {
                 Vector4 blended{0.0f, 0.0f, 0.0f, 0.0f};
@@ -1581,7 +1628,7 @@ void DrawDecodedSkinSubModel(DesktopGraphics::DecodedSkinSubModel* decoded, void
                     }
 
                     Vector4 transformed;
-                    VuTransformPoint(&joints[jointIndex], &bind, &transformed);
+                    VuTransformPoint(&joints[jointIndex], &base, &transformed);
                     f32 weight = decoded->jointWeights[vertex * 3 + joint];
                     blended.x += weight * transformed.x;
                     blended.y += weight * transformed.y;
@@ -1728,6 +1775,60 @@ void DrawSkin(Skin* skin, const Matrix4x4* joints, u32 jointCount, const Matrix4
 
 void DrawBlendSkin(BlendSkin* skin, const Matrix4x4* joints, u32 jointCount, const Matrix4x4* matrix, const ModelLights& lights, const f32* weights, const s32* shapes, s32 shapeCount, u32 mode)
 {
+    auto* desktop = reinterpret_cast<DesktopGraphics::BlendSkin*>(skin);
+    if (desktop == nullptr || matrix == nullptr)
+    {
+        return;
+    }
+
+    // The matrix is the model's to the world; the view's to the screen makes the model's to the screen, the joints' own (the
+    // model's space) blending each vertex after the shape offsets have deformed it (what the PS2's VU1 gets in a blend skin's)
+    Matrix4x4 toScreen;
+    VuMultiplyMatrices(matrix, DesktopGraphics::ViewToScreen(), &toScreen);
+
+    for (u32 subModel = 0; subModel < desktop->count; subModel++)
+    {
+        DesktopGraphics::BlendSubModel* sub = desktop->subModels != nullptr ? desktop->subModels[subModel] : nullptr;
+        if (sub == nullptr)
+        {
+            continue;
+        }
+
+        DesktopGraphics::Material* material = nullptr;
+        if (desktop->materials != nullptr && desktop->materials[subModel] != nullptr)
+        {
+            material = desktop->materials[subModel]->material;
+        }
+
+        DesktopGraphics::Texture* texture = MaterialTexture(material);
+        void* sdlTexture = texture != nullptr ? texture->sdlTexture : nullptr;
+
+        for (u32 partIndex = 0; partIndex < sub->count; partIndex++)
+        {
+            DesktopGraphics::BlendPart* part = sub->parts != nullptr ? sub->parts[partIndex] : nullptr;
+            if (part == nullptr)
+            {
+                continue;
+            }
+
+            // The parts of a submodel share their blend shape scale, the first one's (what the PS2 writes to VU1)
+            const f32* factors = sub->parts[0] != nullptr ? sub->parts[0]->shapeFactors : part->shapeFactors;
+            BlendShapeState blend;
+            blend.counts = part->shapeCounts;
+            blend.addresses = part->shapeAddresses;
+            blend.factors = factors;
+            blend.weights = weights;
+            blend.shapes = shapes;
+            blend.shapeCount = shapeCount;
+            blend.shapeTotal = part->shapeCount;
+
+            DrawDecodedSkinSubModel(DecodedBlendPartOf(part), sdlTexture, &toScreen, joints, jointCount, true, &blend);
+        }
+    }
+
+    // The lighting is VU1's for now; the colours the packets carry are drawn as they are
+    (void)lights;
+    (void)mode;
 }
 
 void SetUpShadowPass()
