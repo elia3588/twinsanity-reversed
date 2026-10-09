@@ -279,6 +279,10 @@ void FreeDecodedSubModel(DesktopGraphics::DecodedSubModel* decoded)
     {
         std::free(decoded->colours);
     }
+    if (decoded->noDraw != nullptr)
+    {
+        std::free(decoded->noDraw);
+    }
 
     std::free(decoded);
 }
@@ -302,10 +306,11 @@ DesktopGraphics::DecodedSubModel* DecodeSubModel(const u8* packet, u32 size, u32
     decoded->normals = AllocateDecoded<Vector4>(vertexCount);
     decoded->textureCoordinates = AllocateDecoded<Vector2>(vertexCount);
     decoded->colours = AllocateDecoded<u32>(vertexCount);
+    decoded->noDraw = AllocateDecoded<u8>(vertexCount);
     decoded->stripStarts = AllocateDecoded<u32>(vertexCount);
     decoded->stripCounts = AllocateDecoded<u32>(vertexCount);
     if (decoded->positions == nullptr || decoded->normals == nullptr || decoded->textureCoordinates == nullptr ||
-        decoded->colours == nullptr || decoded->stripStarts == nullptr || decoded->stripCounts == nullptr)
+        decoded->colours == nullptr || decoded->noDraw == nullptr || decoded->stripStarts == nullptr || decoded->stripCounts == nullptr)
     {
         FreeDecodedSubModel(decoded);
         return nullptr;
@@ -316,6 +321,7 @@ DesktopGraphics::DecodedSubModel* DecodeSubModel(const u8* packet, u32 size, u32
     for (u32 index = 0; index < vertexCount; index++)
     {
         decoded->colours[index] = 0xFFFFFFFF;
+        decoded->noDraw[index] = 0;
     }
 
     const u32* words = reinterpret_cast<const u32*>(packet);
@@ -361,7 +367,21 @@ DesktopGraphics::DecodedSubModel* DecodeSubModel(const u8* packet, u32 size, u32
                     }
                     else if (address == 4)
                     {
+                        // The UV/color unpack at address 4 carries: U, V, and packed color with ADC bit in component 3
+                        // Components: 0=U, 1=V, 2=packed (normal/color), 3=packed color with ADC bit (bit 15)
                         decoded->textureCoordinates[at] = Vector2{AsFloat(data[base]), AsFloat(data[base + 1])};
+                        if (components >= 4)
+                        {
+                            // The ADC/no-draw bit is in the 4th component (index 3), bit 15 (0x8000)
+                            u32 adcWord = data[base + 3];
+                            decoded->noDraw[at] = (adcWord & 0x8000) != 0 ? 1 : 0;
+                            // Also extract the vertex color from the UV/color unpack (lower bytes of components 0-3)
+                            u32 r = data[base] & 0xFF;
+                            u32 g = data[base + 1] & 0xFF;
+                            u32 b = data[base + 2] & 0xFF;
+                            u32 a = data[base + 3] & 0xFF;
+                            decoded->colours[at] = (a << 24) | (b << 16) | (g << 8) | r;
+                        }
                     }
                     else if (address == 5)
                     {
@@ -1541,14 +1561,21 @@ void DrawDecodedSubModel(DesktopGraphics::DecodedSubModel* decoded, void* textur
                 ClipToScreen(clips[index], across, down, &screen[index]);
             }
 
-            SdlGfx::DrawTriangleStrip3D(texture, screen, count, writeDepth);
+            u32 stripStart = decoded->stripStarts[strip];
+            SdlGfx::DrawTriangleStrip3D(texture, screen, count, writeDepth, decoded->noDraw + stripStart);
         }
         else
         {
             // The strip is a run of triangles (i, i + 1, i + 2): each one crossing the camera's plane is clipped and drawn on
             // its own (the vertexes it keeps are shared with neither neighbour, which the depth test then sorts out)
+            u32 stripStart = decoded->stripStarts[strip];
             for (u32 index = 0; index + 2 < count; index++)
             {
+                if (decoded->noDraw[stripStart + index + 2] != 0)
+                {
+                    continue;   // the triangle ending at a no-draw vertex is one the GS draws not either
+                }
+
                 ClipVertex triangle[3] = {clips[index], clips[index + 1], clips[index + 2]};
                 ClipVertex polygon[4];
                 u32 vertices = ClipTriangleToCamera(triangle, polygon);
