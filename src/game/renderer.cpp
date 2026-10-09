@@ -538,7 +538,8 @@ extern "C" void DrawRendererScene(Renderer* renderer)
             ClearLightingUnused();
             s32 fov = lens->fov;
             f32 aspect = g_WidescreenTv != 0 ? WideAspect : NarrowAspect;
-            Platform::Graphics::SetViewFrustum(lens->nearPlane, lens->farPlane, aspect, &fov);
+            f32 correctedAspect = aspect * lens->pixelAspect;
+            Platform::Graphics::SetViewFrustum(lens->nearPlane, lens->farPlane, correctedAspect, &fov);
             renderer->view->MakeMatrices(renderer->target);
             chunk->drawMatrix = identity;
             if (sky != nullptr)
