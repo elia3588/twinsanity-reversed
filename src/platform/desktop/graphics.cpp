@@ -1437,7 +1437,10 @@ void ClipToScreen(const ClipVertex& clip, f32 across, f32 down, SdlGfx::Vertex3D
     out->blue = ScaleChannel(static_cast<u8>((clip.colour >> 16) & 0xFF), 192);
     out->alpha = ScaleChannel(static_cast<u8>((clip.colour >> 24) & 0xFF), 128);
     out->u = clip.u;
-    out->v = clip.v;
+    // The decoded textures' rows run bottom-up (the SDL image's row 0 is the game texture's bottom, the 2D drawers and the
+    // font turn their source areas about for it): the game's own v (0 at a texture's top) is turned about to sample the row
+    // the game means, as the 2D's do
+    out->v = 1.0f - clip.v;
 }
 }
 
