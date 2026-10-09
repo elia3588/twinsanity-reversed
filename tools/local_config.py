@@ -54,6 +54,22 @@ def sdl2():
     return Path(value).as_posix() if value else None
 
 
+def cxx():
+    """The desktop build's compiler: $CXX / "cxx", else a 32 bit x86 MinGW's g++ found, else g++ (the host's, which on
+    Windows is 64 bit and can't link the desktop build's -m32 object files against its own runtime)"""
+    value = _setting("CXX", "cxx")
+    if value:
+        return value
+
+    if WINDOWS:
+        for candidate in ("C:/msys64/mingw32/bin/g++.exe", "C:/mingw32/bin/g++.exe", "C:/MinGW/bin/g++.exe",
+                          "C:/tools/mingw32/bin/g++.exe"):
+            if Path(candidate).exists():
+                return Path(candidate).as_posix()
+
+    return "g++"
+
+
 def pcsx2():
     """How to start PCSX2: a list of arguments before its own ("flatpak run ... net.pcsx2.PCSX2", or the executable)"""
     value = _setting("PCSX2", "pcsx2")

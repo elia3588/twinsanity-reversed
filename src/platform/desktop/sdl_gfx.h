@@ -29,6 +29,24 @@ struct Vertex
 // The vertexes' connected triangles (each the next three of them), coloured by the vertexes, the texture's pixels over those
 // colours when it isn't nullptr
 void DrawTriangleStrip(void* texture, const Vertex* vertices, u32 count);
+// One vertex of the 3D scene: where it is in the window's pixels and its depth (0 nearest, 1 farthest, tested against what's
+// already drawn), with the same colour and texture coordinates as Vertex
+struct Vertex3D
+{
+    f32 x;
+    f32 y;
+    f32 z;
+    u8 red;
+    u8 green;
+    u8 blue;
+    u8 alpha;
+    f32 u;
+    f32 v;
+};
+// The same strip as DrawTriangleStrip, over triangles that depth-test against each other and against the frame's depth.
+// The depth isn't written when writeDepth is clear: a background (a sky) tests against the frame's depth without ever hiding
+// what's drawn after it
+void DrawTriangleStrip3D(void* texture, const Vertex3D* vertices, u32 count, bool writeDepth = true);
 // The texture drawn in the window: the destination's and the source's rectangles in pixels, and the tint its pixels are
 // modulated by
 void DrawTexture(void* texture, s32 dstX, s32 dstY, s32 dstWidth, s32 dstHeight, s32 srcX, s32 srcY, s32 srcWidth, s32 srcHeight,

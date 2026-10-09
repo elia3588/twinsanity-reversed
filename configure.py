@@ -71,7 +71,10 @@ DESKTOP_CLANG_FLAGS = ["-gline-tables-only", "-Wno-tautological-undefined-compar
 DESKTOP_LDFLAGS = ["-m32", "-no-pie", "-static-libgcc"]
 # Windows: MinGW's runtime linked in, so only SDL2.dll goes next to the executable, and the system timer's steps (winmm)
 DESKTOP_WINDOWS_LDFLAGS = ["-m32", "-static"]
-DESKTOP_WINDOWS_LIBS = ["-lwinmm"]
+# OpenGL (the frame's scene and 2D, sdl_gfx.cpp and window.cpp) and the system timer's steps (winmm)
+DESKTOP_WINDOWS_LIBS = ["-lwinmm", "-lopengl32"]
+# Elsewhere OpenGL is libGL (the window's context is SDL's)
+DESKTOP_LIBS = ["-lGL"]
 
 PLATFORM = os.environ.get("PLATFORM", "ps2")
 if "--platform" in sys.argv[1:]:
@@ -236,7 +239,7 @@ class DesktopSetup:
     retail data's added ones, the SDL2 files' own (SDL2's when there's one), the link's and the libraries"""
 
     def __init__(self):
-        self.cxx = sys.argv[sys.argv.index("--cxx") + 1] if "--cxx" in sys.argv[1:] else os.environ.get("CXX", "g++")
+        self.cxx = sys.argv[sys.argv.index("--cxx") + 1] if "--cxx" in sys.argv[1:] else local_config.cxx()
         clang = is_clang(self.cxx)
         self.windows = is_windows_target(self.cxx)
         compiler = DESKTOP_CLANG_FLAGS if clang else DESKTOP_GCC_FLAGS
@@ -249,7 +252,7 @@ class DesktopSetup:
         self.sdl2_cxxflags = DESKTOP_CXXFLAGS + compiler + (["-DDESKTOP_SDL2"] + sdl2[0] if sdl2 else [])
         self.sdl2_dll = sdl2[2] if sdl2 else None
         self.ldflags = DESKTOP_WINDOWS_LDFLAGS if self.windows else DESKTOP_LDFLAGS
-        self.libs = (sdl2[1] if sdl2 else []) + (DESKTOP_WINDOWS_LIBS if self.windows else [])
+        self.libs = (sdl2[1] if sdl2 else []) + (DESKTOP_WINDOWS_LIBS if self.windows else DESKTOP_LIBS)
         self.executable = "twinsanity" + (".exe" if self.windows else "")
 
     def flags(self, path):

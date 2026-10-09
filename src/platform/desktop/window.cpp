@@ -7,6 +7,7 @@
 // The program's own main, not SDL's
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
+#include <SDL_opengl.h>
 
 namespace
 {
@@ -36,7 +37,7 @@ constexpr s16 StickThreshold = 0x4000;
 
 bool g_Started = false;
 SDL_Window* g_Window = nullptr;
-SDL_Renderer* g_Renderer = nullptr;
+SDL_GLContext g_Context = nullptr;
 SDL_GameController* g_Controller = nullptr;
 u32 g_PadButtons = 0;
 
@@ -195,19 +196,31 @@ void DesktopWindow::Open()
     }
 
     g_Started = true;
+    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+    SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 8);
+    SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 8);
+    SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 8);
+    SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 8);
     g_Window = SDL_CreateWindow("Crash Twinsanity", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, WindowWidth, WindowHeight,
-                                SDL_WINDOW_RESIZABLE);
+                                SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
     if (g_Window == nullptr)
     {
         std::fprintf(stderr, "No window: %s\n", SDL_GetError());
         return;
     }
 
-    // The vertical blank is the game's to wait for (Platform::Graphics::WaitVSync), presenting doesn't
-    g_Renderer = SDL_CreateRenderer(g_Window, -1, 0);
-    if (g_Renderer == nullptr)
+    // The frame (the scene and the 2D over it) is drawn through OpenGL; the vertical blank is the game's to wait for
+    // (Platform::Graphics::WaitVSync), so the swap doesn't wait for one itself
+    g_Context = SDL_GL_CreateContext(g_Window);
+    if (g_Context == nullptr)
     {
-        std::fprintf(stderr, "Nothing shown in the window: %s\n", SDL_GetError());
+        std::fprintf(stderr, "No OpenGL context: %s\n", SDL_GetError());
+    }
+    else
+    {
+        SDL_GL_MakeCurrent(g_Window, g_Context);
+        SDL_GL_SetSwapInterval(0);
     }
 
     // A controller already plugged in (ones plugged in later come through the device events)
@@ -255,28 +268,43 @@ bool DesktopWindow::HandleEvents()
 
 void DesktopWindow::Show(u8 red, u8 green, u8 blue)
 {
-    if (g_Renderer == nullptr)
+    if (g_Context == nullptr)
     {
         return;
     }
 
-    SDL_SetRenderDrawColor(g_Renderer, red, green, blue, SDL_ALPHA_OPAQUE);
-    SDL_RenderClear(g_Renderer);
-    SDL_RenderPresent(g_Renderer);
+    glClearColor(static_cast<GLclampf>(red) / 255.0f, static_cast<GLclampf>(green) / 255.0f,
+                 static_cast<GLclampf>(blue) / 255.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    SDL_GL_SwapWindow(g_Window);
 }
 
 namespace DesktopWindow
 {
-SDL_Renderer* GetRenderer()
+void GetSize(s32* width, s32* height)
 {
-    return g_Renderer;
+    s32 drawableWidth = 0;
+    s32 drawableHeight = 0;
+    if (g_Window != nullptr)
+    {
+        SDL_GL_GetDrawableSize(g_Window, &drawableWidth, &drawableHeight);
+    }
+
+    if (width != nullptr)
+    {
+        *width = drawableWidth;
+    }
+    if (height != nullptr)
+    {
+        *height = drawableHeight;
+    }
 }
 
 void Present()
 {
-    if (g_Renderer != nullptr)
+    if (g_Context != nullptr && g_Window != nullptr)
     {
-        SDL_RenderPresent(g_Renderer);
+        SDL_GL_SwapWindow(g_Window);
     }
 }
 
@@ -294,10 +322,10 @@ void DesktopWindow::Close()
         return;
     }
 
-    if (g_Renderer != nullptr)
+    if (g_Context != nullptr)
     {
-        SDL_DestroyRenderer(g_Renderer);
-        g_Renderer = nullptr;
+        SDL_GL_DeleteContext(g_Context);
+        g_Context = nullptr;
     }
 
     if (g_Controller != nullptr)
@@ -456,9 +484,16 @@ void DesktopWindow::Close()
 
 namespace DesktopWindow
 {
-::SDL_Renderer* GetRenderer()
+void GetSize(s32* width, s32* height)
 {
-    return nullptr;
+    if (width != nullptr)
+    {
+        *width = 0;
+    }
+    if (height != nullptr)
+    {
+        *height = 0;
+    }
 }
 
 void Present()

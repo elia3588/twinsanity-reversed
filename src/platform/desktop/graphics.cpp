@@ -3,21 +3,25 @@
 #include "clock.h"
 #include "window.h"
 #include "graphics_internal.h"
+#include "frustum.h"
 #include "gs_texture.h"
 #include "sdl_gfx.h"
 
 #include "game/context.h"
+#include "game/controllers.h"
 #include "game/font.h"
 #include "game/particles.h"
+#include "game/place.h"
 #include "game/renderer.h"
 #include "game/resources.h"
+#include "game/view.h"
 #include "game/graphicstables.h"
 #include "game/memory.h"
+#include "game/scenery.h"
 #include "game/shaderanimation.h"
 #include "game/stream.h"
 
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -31,13 +35,13 @@
 namespace
 {
 u8 g_ClearColor[3] = {};
-u32 g_DrawsInFrame = 0;
-bool g_LogDraws = false;
-u32 g_DrawLogLines = 0;
-bool g_LogStripVertexes = false;
 // The screen the game draws in, its pixel size (the shapes' places are pixels of it)
 s32 g_ScreenWidthPx = 512;
 s32 g_ScreenHeightPx = 512;
+// The frame's corner in the GS's own pixels (the screen's middle at 2048), which SetUpRenderTarget works out; the 3D draw takes
+// the projection's off it to reach the game's screen
+s32 g_TargetX = 0;
+s32 g_TargetY = 0;
 
 // The frame's memory (AllocFrameMemory): a bump arena of chunks that live until the frame is drawn, then are let go (the PS2's
 // own is the frame buckets' DMA chain). A chunk never moves once made, so the pointers handed out stay valid
@@ -146,7 +150,449 @@ void DestroyDesktopShader(DesktopGraphics::Shader* shader)
 
     MemoryDeallocate2_(shader);
 }
+
+// An array of count items of the game's heap, or none for no items
+template <typename T>
+T* AllocateItems(u32 count)
+{
+    return count != 0 ? static_cast<T*>(MemoryAllocate(count * sizeof(T))) : nullptr;
 }
+
+// The decode's own data (DesktopGraphics::DecodedSubModel and its arrays): a host allocation, not the game's heap (the game's
+// arena is the PS2's size and the decode is the desktop's alone, which would otherwise crowd the level's own allocations out)
+template <typename T>
+T* AllocateDecoded(u32 count)
+{
+    return count != 0 ? static_cast<T*>(std::malloc(static_cast<size_t>(count) * sizeof(T))) : nullptr;
+}
+
+// A packet of a model's or skin's submodel kept as its file's bytes, in a block of its own: the decode reads it when the model
+// is drawn. None for an empty packet (the stream reads nothing)
+u8* ReadPacketBytes(Stream* stream, u32 size)
+{
+    if (size == 0)
+    {
+        return nullptr;
+    }
+
+    auto* packet = static_cast<u8*>(MemoryAllocate(size));
+    if (packet != nullptr)
+    {
+        stream->Read(packet, size, 1);
+    }
+
+    return packet;
+}
+
+// The PS2 VU1 model packets (the DMA chains the PS2 renderer's WriteSubModels makes) decoded into host geometry. A packet is the
+// submodel's size word and its zero, then per strip: a GIF tag and its registers (VU1 addresses 0 and 1, kept for VU1 alone, not
+// read here), the strip's texture coordinates, normals, positions and colours (VU1 addresses 4, 5, 3 and 6, the order materials.cpp
+// writes them in), closed by an MSCAL starting the programme that draws the strip. A strip's vertexes are a triangle strip (its
+// GIF tag's PRIM), so the decode hands the draws runs of the strip.
+f32 AsFloat(u32 bits)
+{
+    f32 value;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+// The components one UNPACK kind's element takes (V4Bytes, one packed word, is a single component)
+u32 UnpackComponents(u32 command)
+{
+    if (command == 0x6E)
+    {
+        return 1;
+    }
+
+    return ((command >> 2) & 3) + 1;
+}
+
+u32 UnpackElementSize(u32 command, u32 unpackComponents)
+{
+    // V4Bytes unpacks one packed word an element; the S, V2, V3 and V4 kinds one word a component, or (their low bit set)
+    // one halfword a component (the skins' own positions and coordinates)
+    if (command == 0x6E)
+    {
+        return 1;
+    }
+
+    return (command & 1) != 0 ? (unpackComponents * 2 + 3) / 4 : unpackComponents;
+}
+
+void FreeDecodedSubModel(DesktopGraphics::DecodedSubModel* decoded)
+{
+    if (decoded == nullptr)
+    {
+        return;
+    }
+
+    if (decoded->stripStarts != nullptr)
+    {
+        std::free(decoded->stripStarts);
+    }
+    if (decoded->stripCounts != nullptr)
+    {
+        std::free(decoded->stripCounts);
+    }
+    if (decoded->positions != nullptr)
+    {
+        std::free(decoded->positions);
+    }
+    if (decoded->normals != nullptr)
+    {
+        std::free(decoded->normals);
+    }
+    if (decoded->textureCoordinates != nullptr)
+    {
+        std::free(decoded->textureCoordinates);
+    }
+    if (decoded->colours != nullptr)
+    {
+        std::free(decoded->colours);
+    }
+
+    std::free(decoded);
+}
+
+// One submodel's packet decoded, null when it isn't the shape expected (the submodel isn't drawn)
+DesktopGraphics::DecodedSubModel* DecodeSubModel(const u8* packet, u32 size, u32 vertexCount)
+{
+    if (packet == nullptr || size < 16 || vertexCount == 0)
+    {
+        return nullptr;
+    }
+
+    auto* decoded = static_cast<DesktopGraphics::DecodedSubModel*>(std::malloc(sizeof(DesktopGraphics::DecodedSubModel)));
+    if (decoded == nullptr)
+    {
+        return nullptr;
+    }
+
+    std::memset(decoded, 0, sizeof(*decoded));
+    decoded->positions = AllocateDecoded<Vector4>(vertexCount);
+    decoded->normals = AllocateDecoded<Vector4>(vertexCount);
+    decoded->textureCoordinates = AllocateDecoded<Vector2>(vertexCount);
+    decoded->colours = AllocateDecoded<u32>(vertexCount);
+    decoded->stripStarts = AllocateDecoded<u32>(vertexCount);
+    decoded->stripCounts = AllocateDecoded<u32>(vertexCount);
+    if (decoded->positions == nullptr || decoded->normals == nullptr || decoded->textureCoordinates == nullptr ||
+        decoded->colours == nullptr || decoded->stripStarts == nullptr || decoded->stripCounts == nullptr)
+    {
+        FreeDecodedSubModel(decoded);
+        return nullptr;
+    }
+
+    // A submodel without a colour UNPACK (the level's meshes: the material's own colour tints them) keeps white, so the
+    // host's allocation's leftovers never tint or hide it
+    for (u32 index = 0; index < vertexCount; index++)
+    {
+        decoded->colours[index] = 0xFFFFFFFF;
+    }
+
+    const u32* words = reinterpret_cast<const u32*>(packet);
+    const u32 wordCount = size / 4;
+    u32 word = 2;      // the size word and its zero
+    u32 vertex = 0;    // where the next unpacked vertex goes
+    u32 strip = 0;
+    u32 stripStart = 0;
+    bool ok = true;
+
+    while (word < wordCount && ok)
+    {
+        const u32 command = (words[word] >> 24) & 0xFF;
+        if (command >= 0x60 && command <= 0x6F)
+        {
+            const u32 components = UnpackComponents(command);
+            const u32 elementSize = UnpackElementSize(command, components);
+            const u32 count = (words[word] >> 16) & 0xFF;
+            const u32 address = words[word] & 0x3FFF;
+            if (word + 1 + elementSize * count > wordCount)
+            {
+                ok = false;     // the packet ends before this unpack's data does
+                break;
+            }
+            const u32* data = &words[word + 1];
+            if (address == 3 || address == 4 || address == 5 || address == 6)
+            {
+                // Every attribute of a strip is indexed from the strip's first vertex (the positions' cursor has already
+                // advanced past the strip by the time the texture, normal and colour unpacks arrive)
+                if (stripStart + count > vertexCount)
+                {
+                    ok = false;
+                    break;
+                }
+
+                for (u32 index = 0; index < count; index++)
+                {
+                    const u32 base = index * elementSize;
+                    const u32 at = stripStart + index;
+                    if (address == 3)
+                    {
+                        decoded->positions[at] = Vector4{AsFloat(data[base]), AsFloat(data[base + 1]), AsFloat(data[base + 2]), 1.0f};
+                    }
+                    else if (address == 4)
+                    {
+                        decoded->textureCoordinates[at] = Vector2{AsFloat(data[base]), AsFloat(data[base + 1])};
+                    }
+                    else if (address == 5)
+                    {
+                        decoded->normals[at] = Vector4{AsFloat(data[base]), AsFloat(data[base + 1]), AsFloat(data[base + 2]), 0.0f};
+                    }
+                    else
+                    {
+                        decoded->colours[at] = data[base];
+                    }
+                }
+
+                if (address == 3)
+                {
+                    vertex = stripStart + count;
+                }
+            }
+
+            word += 1 + elementSize * count;
+            continue;
+        }
+
+        if (command == 0x14)    // MSCAL: the strip's end
+        {
+            if (vertex > stripStart)
+            {
+                decoded->stripStarts[strip] = stripStart;
+                decoded->stripCounts[strip] = vertex - stripStart;
+                strip++;
+            }
+            stripStart = vertex;
+            word += 2;          // the MSCAL and the programme's address
+            continue;
+        }
+
+        if (command == 0x00 || command == 0x01 || command == 0x07)   // NOP, STCYCL, MARK
+        {
+            word += 1;
+            continue;
+        }
+
+        ok = false;             // an unexpected code: stop, the packet isn't as expected
+    }
+
+    if (!ok || vertex == 0)
+    {
+        FreeDecodedSubModel(decoded);
+        return nullptr;
+    }
+
+    decoded->vertexCount = vertex;
+    decoded->stripCount = strip;
+    return decoded;
+}
+
+// The submodel's decode, made once and kept on the model (graphics_internal.h)
+DesktopGraphics::DecodedSubModel* DecodedSubModelOf(DesktopGraphics::Model* model, u32 subModel)
+{
+    if (model->decoded == nullptr)
+    {
+        model->decoded = AllocateDecoded<DesktopGraphics::DecodedSubModel*>(model->subModelCount);
+        if (model->decoded == nullptr)
+        {
+            return nullptr;
+        }
+
+        for (u32 index = 0; index < model->subModelCount; index++)
+        {
+            model->decoded[index] = nullptr;
+        }
+    }
+
+    if (model->decoded[subModel] == nullptr && model->packets != nullptr && model->sizes != nullptr)
+    {
+        model->decoded[subModel] = DecodeSubModel(model->packets[subModel], model->sizes[subModel], model->vertexCounts[subModel]);
+    }
+
+    return model->decoded[subModel];
+}
+
+// A material's shaders' animations started again (a model's materials are the game's own, graphics_internal.h's)
+void RestartMaterialAnimations(DesktopGraphics::MaterialResource* resource)
+{
+    if (resource == nullptr || resource->material == nullptr)
+    {
+        return;
+    }
+
+    DesktopGraphics::Material* material = resource->material;
+    for (u32 index = 0; index < material->shaderCount; index++)
+    {
+        DesktopGraphics::Shader* shader = material->shaders[index];
+        if (shader != nullptr && shader->animation != nullptr)
+        {
+            RestartShaderAnimation(shader->animation);
+        }
+    }
+}
+
+// A rigid model's or mesh's data after its version: the materials it names, the model it's of and (the desktop drawing each
+// frame's placements itself) no block of instances
+void ReadRigidModelData(DesktopGraphics::RigidModel* model, Stream* stream)
+{
+    s32 count = 0;
+    stream->ReadS32(&count);
+    model->count = static_cast<u32>(count);
+    model->materials = AllocateItems<DesktopGraphics::MaterialResource*>(model->count);
+    for (u32 index = 0; index < model->count; index++)
+    {
+        u32 id = 0;
+        stream->ReadS32(reinterpret_cast<s32*>(&id));
+        model->materials[index] = reinterpret_cast<DesktopGraphics::MaterialResource*>(g_MaterialTable.Acquire(&id, nullptr));
+    }
+
+    s32 modelId = 0;
+    stream->ReadS32(&modelId);
+    model->modelId = static_cast<u32>(modelId);
+    model->model = reinterpret_cast<DesktopGraphics::Model*>(g_ModelTable.Acquire(&model->modelId, nullptr));
+    model->instances.block = nullptr;
+    model->instances.needsEye = 0;
+    model->instances.billboard = 0;
+}
+
+// A rigid model or mesh let go of: its materials' and its model's references, and its own memory
+void DestroyRigidModel(DesktopGraphics::RigidModel* model)
+{
+    if (model == nullptr)
+    {
+        return;
+    }
+
+    for (u32 index = 0; index < model->count; index++)
+    {
+        if (model->materials != nullptr && model->materials[index] != nullptr)
+        {
+            g_MaterialTable.ReleaseItem(reinterpret_cast<MaterialResource*>(model->materials[index]));
+        }
+    }
+
+    if (model->model != nullptr)
+    {
+        g_ModelTable.ReleaseItem(reinterpret_cast<RigidModelData*>(model->model));
+    }
+
+    if (model->materials != nullptr)
+    {
+        MemoryDeallocate2_(model->materials);
+    }
+
+    MemoryDeallocate2_(model);
+}
+
+// The meshes a LOD or sky names, taken from the mesh table
+void ReadMeshIds(DesktopGraphics::RigidModel** meshes, u32 count, Stream* stream)
+{
+    for (u32 index = 0; index < count; index++)
+    {
+        u32 id = 0;
+        stream->ReadS32(reinterpret_cast<s32*>(&id));
+        meshes[index] = reinterpret_cast<DesktopGraphics::RigidModel*>(g_MeshTable.Acquire(&id, nullptr));
+    }
+}
+
+// A blend part: its packet of vertexes, the factors VU1 gets with each shape's weight, and its shapes' vertex data (their sizes
+// in quadwords the files have)
+void ReadBlendPart(DesktopGraphics::BlendPart* part, Stream* stream, u32 shapeCount)
+{
+    std::memset(part, 0, sizeof(DesktopGraphics::BlendPart));
+
+    s32 packetSize = 0;
+    s32 unused = 0;
+    stream->ReadS32(&packetSize);
+    stream->ReadS32(&unused);
+    part->packetSize = static_cast<u32>(packetSize);
+    part->packet = ReadPacketBytes(stream, part->packetSize);
+
+    stream->Read(part->shapeFactors, sizeof(part->shapeFactors), 1);
+    part->shapeCount = static_cast<u8>(shapeCount);
+    part->shapeAddresses = AllocateItems<u8*>(part->shapeCount);
+    part->shapeSizes = AllocateItems<u32>(part->shapeCount);
+    part->shapeCounts = AllocateItems<u32>(part->shapeCount);
+    for (u32 shape = 0; shape < part->shapeCount; shape++)
+    {
+        s32 size = 0;
+        s32 count = 0;
+        stream->ReadS32(&size);
+        stream->ReadS32(&count);
+        part->shapeSizes[shape] = static_cast<u32>(size);
+        part->shapeCounts[shape] = static_cast<u32>(count);
+        part->shapeAddresses[shape] = ReadPacketBytes(stream, part->shapeSizes[shape] << 4);
+    }
+}
+
+// A blend submodel's parts, made and read
+void ReadBlendParts(DesktopGraphics::BlendSubModel* subModel, Stream* stream, u32 shapeCount)
+{
+    subModel->parts = AllocateItems<DesktopGraphics::BlendPart*>(subModel->count);
+    for (u32 index = 0; index < subModel->count; index++)
+    {
+        auto* part = static_cast<DesktopGraphics::BlendPart*>(MemoryAllocate(sizeof(DesktopGraphics::BlendPart)));
+        subModel->parts[index] = part;
+        if (part != nullptr)
+        {
+            ReadBlendPart(part, stream, shapeCount);
+        }
+    }
+}
+
+// A blend submodel destroyed: its parts' packets, shapes and memory
+void DestroyBlendSubModel(DesktopGraphics::BlendSubModel* subModel)
+{
+    if (subModel == nullptr)
+    {
+        return;
+    }
+
+    for (u32 index = 0; index < subModel->count; index++)
+    {
+        DesktopGraphics::BlendPart* part = subModel->parts != nullptr ? subModel->parts[index] : nullptr;
+        if (part == nullptr)
+        {
+            continue;
+        }
+
+        if (part->packet != nullptr)
+        {
+            MemoryDeallocate2_(part->packet);
+        }
+
+        for (u32 shape = 0; shape < part->shapeCount; shape++)
+        {
+            if (part->shapeAddresses != nullptr && part->shapeAddresses[shape] != nullptr)
+            {
+                MemoryDeallocate2_(part->shapeAddresses[shape]);
+            }
+        }
+
+        if (part->shapeAddresses != nullptr)
+        {
+            MemoryDeallocate2_(part->shapeAddresses);
+        }
+        if (part->shapeSizes != nullptr)
+        {
+            MemoryDeallocate2_(part->shapeSizes);
+        }
+        if (part->shapeCounts != nullptr)
+        {
+            MemoryDeallocate2_(part->shapeCounts);
+        }
+
+        MemoryDeallocate2_(part);
+    }
+
+    if (subModel->parts != nullptr)
+    {
+        MemoryDeallocate2_(subModel->parts);
+    }
+
+    MemoryDeallocate2_(subModel);
+}
+} // namespace
 
 namespace Platform::Graphics
 {
@@ -198,25 +644,43 @@ void StepAnimations(const TimeClock* clock)
 {
 }
 
+// The matrix from clip space to the GS's own coordinates (16ths of a pixel, the screen's middle at 2048), which the game's view
+// composes into the matrix a model is drawn through (the PS2's renderer/frame.cpp does the same)
 void SetUpRenderTarget(RenderTargetDescription* target)
 {
+    if (target == nullptr)
+    {
+        return;
+    }
+
+    constexpr f32 Middle = 2048.0f;
+    constexpr f32 Subpixels = 16.0f;
+    constexpr f32 HalfSubpixels = 8.0f;
+    constexpr f32 DepthRange = 8388607.0f;
+
+    f32 left = Middle - static_cast<f32>(target->displayWidth) * 0.5f + static_cast<f32>(target->offsetX);
+    f32 top = Middle - static_cast<f32>(target->displayHeight) * 0.5f + static_cast<f32>(target->offsetY);
+    f32 width = static_cast<f32>(target->width);
+    f32 height = static_cast<f32>(target->height);
+
+    Matrix4x4* matrix = &target->clipToScreen;
+    InitIdentityMatrix(matrix);
+    matrix->m[3][0] = (left + width * 0.5f) * Subpixels;
+    target->x = static_cast<s32>(left);
+    matrix->m[1][1] = -height * HalfSubpixels;
+    target->y = static_cast<s32>(top);
+    matrix->m[0][0] = width * HalfSubpixels;
+    matrix->m[3][2] = DepthRange;
+    matrix->m[2][2] = -DepthRange;
+    matrix->m[3][1] = (top + height * 0.5f) * Subpixels;
+
+    g_TargetX = target->x;
+    g_TargetY = target->y;
 }
 
 // The frame's end: the window's next refresh waited for, then what was drawn shown. The frame was cleared at its start
 void Present(const void* commands)
 {
-    static u32 presented = 0;
-    presented++;
-    g_LogDraws = presented <= 3 || (presented >= 47 && presented <= 50) || (presented >= 100 && presented <= 103) ||
-                 (presented >= 180 && presented <= 183);
-    auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
-                            .count();
-    g_LogStripVertexes = presented == 180;
-    if (presented <= 3000)
-    {
-        Log("Present %u t=%lld draws=%u", presented, static_cast<long long>(milliseconds), g_DrawsInFrame);
-    }
-
     WaitVSync();
     DesktopWindow::Present();
 }
@@ -259,14 +723,6 @@ void FinishScene(bool effects)
 // The frame's start: the color it's cleared to (once a frame, before anything of it is drawn)
 void StartFrame(const FrameStart& frame)
 {
-    static u32 frames = 0;
-    if (frames++ < 5)
-    {
-        Log("StartFrame %u clear=%d rgb=%u,%u,%u at %d,%d %dx%d of %dx%d", frames, frame.clearColor != 0, frame.red, frame.green,
-            frame.blue, frame.x, frame.y, frame.width, frame.height, frame.screenWidth, frame.screenHeight);
-    }
-
-    g_DrawsInFrame = 0;
     if (frame.screenWidth > 0 && frame.screenHeight > 0)
     {
         g_ScreenWidthPx = frame.screenWidth;
@@ -395,13 +851,50 @@ void DrawDecals(DecalData* decals)
 {
 }
 
+// A rigid model's submodels drawn with a model-to-screen matrix (defined with the rigid model's draw). The depth isn't written
+// when writeDepth is clear (a background)
+void DrawRigidModelToScreen(RigidModel* model, const Matrix4x4* toScreen, bool writeDepth = true);
+
 void DrawPlacedModel(RigidModel* model, ChunkView* view, const Matrix4x4* world)
 {
+    if (view == nullptr)
+    {
+        return;
+    }
+
+    // The view's toScreen is the model's to the screen: the game's culling set it for this model (ChunkView::DrawnModelResult,
+    // what the PS2's instance gets)
+    DrawRigidModelToScreen(model, &view->toScreen);
+    (void)world;
 }
 
 RigidModel* LodModelAt(Lod* lod, u32 distance)
 {
-    return nullptr;
+    auto* desktop = reinterpret_cast<DesktopGraphics::Lod*>(lod);
+    if (desktop == nullptr || desktop->meshes == nullptr)
+    {
+        return nullptr;
+    }
+
+    if (distance < desktop->nearest || desktop->farthest < distance)
+    {
+        return nullptr;
+    }
+
+    RigidModel* mesh = reinterpret_cast<RigidModel*>(desktop->meshes[0]);
+    s32 last = static_cast<s32>(desktop->count) - 1;
+    if (last <= 0 || distance < desktop->switchDistances[0])
+    {
+        return mesh;
+    }
+
+    mesh = reinterpret_cast<RigidModel*>(desktop->meshes[1]);
+    for (s32 index = 1; index < last && distance >= desktop->switchDistances[index]; index++)
+    {
+        mesh = reinterpret_cast<RigidModel*>(desktop->meshes[index + 1]);
+    }
+
+    return mesh;
 }
 
 void SetFontPage(Material* material, u32 page)
@@ -416,7 +909,6 @@ void SetFontPage(Material* material, u32 page)
 // The UI's sprites and shapes, whose places and texture areas are fractions of the screen and of the texture
 void DrawSprite(Material* material, u32 colour, const Rectangle& place, const Rectangle& texturePlace)
 {
-    g_DrawsInFrame++;
     s32 windowWidth = 0;
     s32 windowHeight = 0;
     SdlGfx::GetSize(&windowWidth, &windowHeight);
@@ -480,15 +972,6 @@ void DrawSprite(Material* material, u32 colour, const Rectangle& place, const Re
     {
         SdlGfx::FillRect(screenX, screenY, screenWidth, screenHeight, red, green, blue, alpha);
     }
-
-    if (g_LogDraws && g_DrawLogLines < 700)
-    {
-        g_DrawLogLines++;
-        Log("draw f=%u mat=%p tex=%p %ux%u place %.4f,%.4f,%.4f,%.4f -> %d,%d %dx%d src %.4f,%.4f,%.4f,%.4f colour %08X",
-            g_DrawsInFrame, material, tex, tex != nullptr ? tex->width : 0, tex != nullptr ? tex->height : 0, p.x, p.y,
-            p.width, p.height, screenX, screenY, screenWidth, screenHeight, texturePlace.x, texturePlace.y,
-            texturePlace.width, texturePlace.height, colour);
-    }
 }
 
 void DrawTurnedSprite(Material* material, u32 colour, const Vector2* corners, const Rectangle& texture)
@@ -515,20 +998,12 @@ void DrawTurnedSprite(Material* material, u32 colour, const Vector2* corners, co
     place.y = top;
     place.width = right - left;
     place.height = bottom - top;
-    static u32 turned = 0;
-    if (turned++ < 100)
-    {
-        Log("turned#%u corners %.4f,%.4f %.4f,%.4f %.4f,%.4f %.4f,%.4f place %.4f,%.4f,%.4f,%.4f", turned, corners[0].x,
-            corners[0].y, corners[1].x, corners[1].y, corners[2].x, corners[2].y, corners[3].x, corners[3].y, place.x, place.y,
-            place.width, place.height);
-    }
 
     DrawSprite(material, colour, place, texture);
 }
 
 void DrawStrip(Material* material, u32 count, const Vector2* places, const u32* colours)
 {
-    g_DrawsInFrame++;
     if (count < 3 || places == nullptr || colours == nullptr)
     {
         return;
@@ -565,22 +1040,243 @@ void DrawStrip(Material* material, u32 count, const Vector2* places, const u32* 
         vertices[vertex].v = 0.0f;
     }
 
-    if (g_LogStripVertexes && g_DrawLogLines < 700)
-    {
-        g_DrawLogLines++;
-        Log("strip n=%u places %.2f,%.2f..%.2f,%.2f -> %.1f,%.1f..%.1f,%.1f first colour %08X", count, places[0].x, places[0].y,
-            places[count - 1].x, places[count - 1].y, vertices[0].x, vertices[0].y, vertices[count - 1].x, vertices[count - 1].y,
-            colours[0]);
-    }
-
     auto* desktop = reinterpret_cast<DesktopGraphics::Material*>(material);
     DesktopGraphics::Texture* tex = MaterialTexture(desktop);
     SdlGfx::DrawTriangleStrip(tex != nullptr ? tex->sdlTexture : nullptr, vertices, count);
     MemoryDeallocate2_(vertices);
 }
 
+namespace
+{
+// A strip's vertex in the clip space the model's to-screen matrix makes (its w is the view's depth), with what the draw needs
+// of it (the packet's own texture coordinates and colour)
+struct ClipVertex
+{
+    f32 x;
+    f32 y;
+    f32 z;
+    f32 w;
+    f32 u;
+    f32 v;
+    u32 colour;
+};
+
+// A packed colour's channels blended along the edge from a to b (t 0 at a, 1 at b)
+u32 BlendColours(u32 a, u32 b, f32 t)
+{
+    u32 colour = 0;
+    for (u32 shift = 0; shift < 32; shift += 8)
+    {
+        f32 from = static_cast<f32>((a >> shift) & 0xFF);
+        f32 to = static_cast<f32>((b >> shift) & 0xFF);
+        f32 value = from + (to - from) * t;
+        u32 channel = static_cast<u32>(value + 0.5f);
+        colour |= (channel > 255 ? 255 : channel) << shift;
+    }
+
+    return colour;
+}
+
+ClipVertex BlendClip(const ClipVertex& a, const ClipVertex& b, f32 t)
+{
+    ClipVertex out;
+    out.x = a.x + (b.x - a.x) * t;
+    out.y = a.y + (b.y - a.y) * t;
+    out.z = a.z + (b.z - a.z) * t;
+    out.w = a.w + (b.w - a.w) * t;
+    out.u = a.u + (b.u - a.u) * t;
+    out.v = a.v + (b.v - a.v) * t;
+    out.colour = BlendColours(a.colour, b.colour, t);
+    return out;
+}
+
+// A triangle clipped to the camera's own plane (w at or below zero is behind it): what's in front, three or four vertexes (none
+// when the whole triangle is behind). The near plane itself is left to the depth test (the clipped edges' depths are the same
+// fractions of the way along their edges as their places are)
+u32 ClipTriangleToCamera(const ClipVertex* triangle, ClipVertex* out)
+{
+    constexpr f32 CameraPlane = 0.0001f;
+    u32 count = 0;
+    for (u32 index = 0; index < 3; index++)
+    {
+        const ClipVertex& a = triangle[index];
+        const ClipVertex& b = triangle[(index + 1) % 3];
+        bool aInside = a.w >= CameraPlane;
+        bool bInside = b.w >= CameraPlane;
+        if (aInside)
+        {
+            out[count++] = a;
+        }
+        if (aInside != bInside)
+        {
+            out[count++] = BlendClip(a, b, (CameraPlane - a.w) / (b.w - a.w));
+        }
+    }
+
+    return count;
+}
+
+// A clip vertex to the window's pixels and depth (0 nearest, 1 farthest)
+void ClipToScreen(const ClipVertex& clip, f32 across, f32 down, SdlGfx::Vertex3D* out)
+{
+    constexpr f32 Subpixels = 16.0f;
+    constexpr f32 DepthRange = 8388607.0f;
+    f32 inverse = 1.0f / clip.w;
+    f32 gameX = clip.x * inverse / Subpixels - static_cast<f32>(g_TargetX);
+    f32 gameY = clip.y * inverse / Subpixels - static_cast<f32>(g_TargetY);
+    out->x = gameX * across;
+    out->y = gameY * down;
+    out->z = 1.0f - clip.z * inverse / (2.0f * DepthRange);
+    out->red = ScaleChannel(static_cast<u8>(clip.colour & 0xFF), 192);
+    out->green = ScaleChannel(static_cast<u8>((clip.colour >> 8) & 0xFF), 192);
+    out->blue = ScaleChannel(static_cast<u8>((clip.colour >> 16) & 0xFF), 192);
+    out->alpha = ScaleChannel(static_cast<u8>((clip.colour >> 24) & 0xFF), 128);
+    out->u = clip.u;
+    out->v = clip.v;
+}
+}
+
+// One decoded submodel's strips drawn: each strip's vertexes are transformed by the model's matrix to the GS's coordinates, then
+// taken to the window's pixels and the game screen's, and drawn depth-tested. A strip wholly in front of the camera is drawn in
+// one go; one crossing the camera's own plane is clipped to it triangle by triangle, so the level's big faces aren't dropped whole
+void DrawDecodedSubModel(DesktopGraphics::DecodedSubModel* decoded, void* texture, const Matrix4x4* matrix, bool writeDepth = true)
+{
+    if (decoded == nullptr || matrix == nullptr || decoded->vertexCount == 0)
+    {
+        return;
+    }
+
+    s32 windowWidth = 0;
+    s32 windowHeight = 0;
+    SdlGfx::GetSize(&windowWidth, &windowHeight);
+    if (windowWidth <= 0 || windowHeight <= 0 || g_ScreenWidthPx <= 0 || g_ScreenHeightPx <= 0)
+    {
+        return;
+    }
+
+    f32 across = static_cast<f32>(windowWidth) / static_cast<f32>(g_ScreenWidthPx);
+    f32 down = static_cast<f32>(windowHeight) / static_cast<f32>(g_ScreenHeightPx);
+
+    for (u32 strip = 0; strip < decoded->stripCount; strip++)
+    {
+        u32 count = decoded->stripCounts[strip];
+        if (count < 3)
+        {
+            continue;
+        }
+
+        auto* clips = static_cast<ClipVertex*>(std::malloc(sizeof(ClipVertex) * count));
+        auto* screen = static_cast<SdlGfx::Vertex3D*>(std::malloc(sizeof(SdlGfx::Vertex3D) * (count + 1)));
+        if (clips == nullptr || screen == nullptr)
+        {
+            std::free(clips);
+            std::free(screen);
+            return;
+        }
+
+        bool behind = false;
+        for (u32 index = 0; index < count; index++)
+        {
+            u32 vertex = decoded->stripStarts[strip] + index;
+            Vector4 transformed;
+            VuTransformPoint(matrix, &decoded->positions[vertex], &transformed);
+            ClipVertex& clip = clips[index];
+            clip.x = transformed.x;
+            clip.y = transformed.y;
+            clip.z = transformed.z;
+            clip.w = transformed.w;
+            clip.u = decoded->textureCoordinates[vertex].x;
+            clip.v = decoded->textureCoordinates[vertex].y;
+            clip.colour = decoded->colours[vertex];
+            if (transformed.w < 0.0001f)
+            {
+                behind = true;
+            }
+        }
+
+        if (!behind)
+        {
+            for (u32 index = 0; index < count; index++)
+            {
+                ClipToScreen(clips[index], across, down, &screen[index]);
+            }
+
+            SdlGfx::DrawTriangleStrip3D(texture, screen, count, writeDepth);
+        }
+        else
+        {
+            // The strip is a run of triangles (i, i + 1, i + 2): each one crossing the camera's plane is clipped and drawn on
+            // its own (the vertexes it keeps are shared with neither neighbour, which the depth test then sorts out)
+            for (u32 index = 0; index + 2 < count; index++)
+            {
+                ClipVertex triangle[3] = {clips[index], clips[index + 1], clips[index + 2]};
+                ClipVertex polygon[4];
+                u32 vertices = ClipTriangleToCamera(triangle, polygon);
+                if (vertices < 3)
+                {
+                    continue;
+                }
+
+                for (u32 vertex = 0; vertex < vertices; vertex++)
+                {
+                    ClipToScreen(polygon[vertex], across, down, &screen[vertex]);
+                }
+
+                SdlGfx::DrawTriangleStrip3D(texture, screen, vertices, writeDepth);
+            }
+        }
+
+        std::free(clips);
+        std::free(screen);
+    }
+}
+
+// A rigid model's submodels drawn with the model-to-screen matrix it's given (the model's own materials)
+void DrawRigidModelToScreen(RigidModel* model, const Matrix4x4* toScreen, bool writeDepth)
+{
+    auto* desktop = reinterpret_cast<DesktopGraphics::RigidModel*>(model);
+    if (desktop == nullptr || desktop->model == nullptr || toScreen == nullptr)
+    {
+        return;
+    }
+
+    DesktopGraphics::Model* decodedModel = desktop->model;
+    u32 count = desktop->count;
+    if (decodedModel->subModelCount < count)
+    {
+        count = decodedModel->subModelCount;
+    }
+
+    for (u32 subModel = 0; subModel < count; subModel++)
+    {
+        DesktopGraphics::Material* material = nullptr;
+        if (desktop->materials != nullptr && desktop->materials[subModel] != nullptr)
+        {
+            material = desktop->materials[subModel]->material;
+        }
+
+        DesktopGraphics::Texture* texture = MaterialTexture(material);
+        DesktopGraphics::DecodedSubModel* decoded = DecodedSubModelOf(decodedModel, subModel);
+        DrawDecodedSubModel(decoded, texture != nullptr ? texture->sdlTexture : nullptr, toScreen, writeDepth);
+    }
+}
+
 void DrawRigidModel(RigidModel* model, const Matrix4x4* matrix, const ModelLights& lights, u32 mode)
 {
+    if (matrix == nullptr)
+    {
+        return;
+    }
+
+    // The matrix is the model's to the world; the view's to the screen makes the model's to the screen (what the PS2's VU1
+    // gets in an instance's toScreen)
+    Matrix4x4 toScreen;
+    VuMultiplyMatrices(matrix, DesktopGraphics::ViewToScreen(), &toScreen);
+    DrawRigidModelToScreen(model, &toScreen);
+
+    // The lighting is VU1's for now; the colours the packets carry are drawn as they are
+    (void)lights;
+    (void)mode;
 }
 
 void DrawSkin(Skin* skin, const Matrix4x4* joints, u32 jointCount, const Matrix4x4* matrix, const ModelLights& lights, u32 mode)
@@ -643,19 +1339,61 @@ Material* MakeSkidMaterial(bool subtracting)
 
 void RestartAnimations(RigidModel* model)
 {
+    auto* desktop = reinterpret_cast<DesktopGraphics::RigidModel*>(model);
+    if (desktop == nullptr || desktop->materials == nullptr || desktop->model == nullptr)
+    {
+        return;
+    }
+
+    u32 count = desktop->count;
+    if (desktop->model->subModelCount < count)
+    {
+        count = desktop->model->subModelCount;
+    }
+
+    for (u32 index = 0; index < count; index++)
+    {
+        RestartMaterialAnimations(desktop->materials[index]);
+    }
 }
 
 void RestartAnimations(Skin* skin)
 {
+    auto* desktop = reinterpret_cast<DesktopGraphics::Skin*>(skin);
+    if (desktop == nullptr)
+    {
+        return;
+    }
+
+    for (u32 index = 0; index < desktop->count; index++)
+    {
+        RestartMaterialAnimations(desktop->materials != nullptr ? desktop->materials[index] : nullptr);
+    }
 }
 
 void RestartAnimations(BlendSkin* skin)
 {
+    auto* desktop = reinterpret_cast<DesktopGraphics::BlendSkin*>(skin);
+    if (desktop == nullptr)
+    {
+        return;
+    }
+
+    for (u32 index = 0; index < desktop->count; index++)
+    {
+        RestartMaterialAnimations(desktop->materials != nullptr ? desktop->materials[index] : nullptr);
+    }
 }
 
 MaterialResource* FirstMaterial(const RigidModel* model)
 {
-    return nullptr;
+    auto* desktop = reinterpret_cast<const DesktopGraphics::RigidModel*>(model);
+    if (desktop == nullptr || desktop->materials == nullptr || desktop->count == 0)
+    {
+        return nullptr;
+    }
+
+    return reinterpret_cast<MaterialResource*>(desktop->materials[0]);
 }
 
 GameTexture* NewTexture(u32 id)
@@ -919,192 +1657,509 @@ void ReadMaterial(MaterialResource* material, Stream* stream)
     resource->unused0C = 0;
 }
 
-// The models and meshes the desktop doesn't draw yet (its 3D) still need their place in the game's tables: their kinds' Item
-// types are complete only in the platform's renderer, so their bytes are the PS2's (renderer.h), their headers at the front and
-// the rest zeroed until the file's bytes are read
+// The models, meshes, skins, blend skins, levels of detail and skies: the game's resources (they keep their place in the game's
+// tables), whose contents the desktop holds in its own types (graphics_internal.h). A model's and skin's submodels keep their
+// packets as the files have them; the decode is the desktop's when it draws them
 RigidModelData* NewModel(u32 id)
 {
-    void* memory = MemoryAllocate(0x1C);
-    if (memory == nullptr)
+    auto* model = static_cast<DesktopGraphics::Model*>(MemoryAllocate(sizeof(DesktopGraphics::Model)));
+    if (model == nullptr)
     {
         return nullptr;
     }
 
-    std::memset(memory, 0, 0x1C);
-    ConstructResourceHeader(memory, id);
-    return static_cast<RigidModelData*>(memory);
+    std::memset(model, 0, sizeof(DesktopGraphics::Model));
+    ConstructResourceHeader(model, id);
+    return reinterpret_cast<RigidModelData*>(model);
 }
 
 void DeleteModel(RigidModelData* model)
 {
-    if (model != nullptr)
+    auto* desktop = reinterpret_cast<DesktopGraphics::Model*>(model);
+    if (desktop == nullptr)
     {
-        MemoryDeallocate2_(model);
+        return;
     }
+
+    for (u32 index = 0; index < desktop->subModelCount; index++)
+    {
+        if (desktop->packets != nullptr && desktop->packets[index] != nullptr)
+        {
+            MemoryDeallocate2_(desktop->packets[index]);
+        }
+        if (desktop->decoded != nullptr && desktop->decoded[index] != nullptr)
+        {
+            FreeDecodedSubModel(desktop->decoded[index]);
+        }
+    }
+
+    if (desktop->decoded != nullptr)
+    {
+        std::free(desktop->decoded);
+    }
+    if (desktop->vertexCounts != nullptr)
+    {
+        MemoryDeallocate2_(desktop->vertexCounts);
+    }
+    if (desktop->sizes != nullptr)
+    {
+        MemoryDeallocate2_(desktop->sizes);
+    }
+    if (desktop->extraSizes != nullptr)
+    {
+        MemoryDeallocate2_(desktop->extraSizes);
+    }
+    if (desktop->packets != nullptr)
+    {
+        MemoryDeallocate2_(desktop->packets);
+    }
+
+    MemoryDeallocate2_(desktop);
 }
 
+// Each submodel: its vertex count, its packet's size in bytes, its packet, and the size of the data that follows it in the file
+// (read here and dropped: VU1's microcode's own, which the desktop doesn't run)
 void ReadModel(RigidModelData* model, Stream* stream)
 {
+    auto* desktop = reinterpret_cast<DesktopGraphics::Model*>(model);
+    s32 subModelCount = 0;
+    stream->ReadS32(&subModelCount);
+    desktop->subModelCount = static_cast<u32>(subModelCount);
+
+    desktop->vertexCounts = AllocateItems<u32>(desktop->subModelCount);
+    desktop->sizes = AllocateItems<u32>(desktop->subModelCount);
+    desktop->extraSizes = AllocateItems<u32>(desktop->subModelCount);
+    desktop->packets = AllocateItems<u8*>(desktop->subModelCount);
+    for (u32 index = 0; index < desktop->subModelCount; index++)
+    {
+        s32 vertexCount = 0;
+        s32 size = 0;
+        stream->ReadS32(&vertexCount);
+        stream->ReadS32(&size);
+        desktop->vertexCounts[index] = static_cast<u32>(vertexCount);
+        desktop->sizes[index] = static_cast<u32>(size);
+        desktop->packets[index] = ReadPacketBytes(stream, desktop->sizes[index]);
+
+        s32 extraSize = 0;
+        stream->ReadS32(&extraSize);
+        desktop->extraSizes[index] = static_cast<u32>(extraSize);
+        if (extraSize > 0)
+        {
+            stream->Skip(extraSize);
+        }
+    }
+
+    Log("ReadModel %p submodels=%u", desktop, desktop->subModelCount);
+    for (u32 index = 0; index < desktop->subModelCount; index++)
+    {
+        Log("  submodel[%u] vertexes=%u bytes=%u extra=%u packet=%p", index, desktop->vertexCounts[index], desktop->sizes[index],
+            desktop->extraSizes[index], desktop->packets[index]);
+    }
 }
 
 RigidModel* NewRigidModel(u32 id)
 {
-    void* memory = MemoryAllocate(0x20);
-    if (memory == nullptr)
+    auto* model = static_cast<DesktopGraphics::RigidModel*>(MemoryAllocate(sizeof(DesktopGraphics::RigidModel)));
+    if (model == nullptr)
     {
         return nullptr;
     }
 
-    std::memset(memory, 0, 0x20);
-    ConstructResourceHeader(memory, id);
-    return static_cast<RigidModel*>(memory);
+    std::memset(model, 0, sizeof(DesktopGraphics::RigidModel));
+    ConstructResourceHeader(model, id);
+    return reinterpret_cast<RigidModel*>(model);
 }
 
 void DeleteRigidModel(RigidModel* model)
 {
-    if (model != nullptr)
-    {
-        MemoryDeallocate2_(model);
-    }
+    DestroyRigidModel(reinterpret_cast<DesktopGraphics::RigidModel*>(model));
 }
 
+// The version, then the materials it names and the model it's of
 void ReadRigidModel(RigidModel* model, Stream* stream)
 {
+    auto* desktop = reinterpret_cast<DesktopGraphics::RigidModel*>(model);
+    s32 version = 0;
+    stream->ReadS32(&version);
+    ReadRigidModelData(desktop, stream);
+
+    Log("ReadRigidModel %p version=%d submodels=%u modelId=%08X", desktop, version, desktop->count, desktop->modelId);
 }
 
+// A skin's submodels: each one's material, its packet's size and vertex count, and its packet (the vertexes all of them have added
+// up; the constructor cleared the count)
 Skin* NewSkin(u32 id)
 {
-    // The skins' are the platform's too (their kind's Item type is complete only there), sized as the PS2's (renderer.h's 0x24)
-    void* memory = MemoryAllocate(0x24);
-    if (memory == nullptr)
+    auto* skin = static_cast<DesktopGraphics::Skin*>(MemoryAllocate(sizeof(DesktopGraphics::Skin)));
+    if (skin == nullptr)
     {
         return nullptr;
     }
 
-    std::memset(memory, 0, 0x24);
-    ConstructResourceHeader(memory, id);
-    return static_cast<Skin*>(memory);
+    std::memset(skin, 0, sizeof(DesktopGraphics::Skin));
+    ConstructResourceHeader(skin, id);
+    return reinterpret_cast<Skin*>(skin);
 }
 
 void DeleteSkin(Skin* skin)
 {
-    if (skin != nullptr)
+    auto* desktop = reinterpret_cast<DesktopGraphics::Skin*>(skin);
+    if (desktop == nullptr)
     {
-        MemoryDeallocate2_(skin);
+        return;
     }
+
+    for (u32 index = 0; index < desktop->count; index++)
+    {
+        if (desktop->materials != nullptr && desktop->materials[index] != nullptr)
+        {
+            g_MaterialTable.ReleaseItem(reinterpret_cast<MaterialResource*>(desktop->materials[index]));
+        }
+
+        if (desktop->packets != nullptr && desktop->packets[index] != nullptr)
+        {
+            MemoryDeallocate2_(desktop->packets[index]);
+        }
+    }
+
+    if (desktop->materials != nullptr)
+    {
+        MemoryDeallocate2_(desktop->materials);
+    }
+    if (desktop->vertexCounts != nullptr)
+    {
+        MemoryDeallocate2_(desktop->vertexCounts);
+    }
+    if (desktop->packets != nullptr)
+    {
+        MemoryDeallocate2_(desktop->packets);
+    }
+    if (desktop->sizes != nullptr)
+    {
+        MemoryDeallocate2_(desktop->sizes);
+    }
+
+    MemoryDeallocate2_(desktop);
 }
 
 void ReadSkin(Skin* skin, Stream* stream)
 {
+    auto* desktop = reinterpret_cast<DesktopGraphics::Skin*>(skin);
+    s32 count = 0;
+    stream->ReadS32(&count);
+    desktop->count = static_cast<u32>(count);
+
+    desktop->materials = AllocateItems<DesktopGraphics::MaterialResource*>(desktop->count);
+    desktop->packets = AllocateItems<u8*>(desktop->count);
+    desktop->sizes = AllocateItems<u32>(desktop->count);
+    desktop->vertexCounts = AllocateItems<u32>(desktop->count);
+    for (u32 index = 0; index < desktop->count; index++)
+    {
+        u32 id = 0;
+        stream->ReadS32(reinterpret_cast<s32*>(&id));
+        desktop->materials[index] = reinterpret_cast<DesktopGraphics::MaterialResource*>(g_MaterialTable.Acquire(&id, nullptr));
+
+        s32 size = 0;
+        s32 vertexCount = 0;
+        stream->ReadS32(&size);
+        stream->ReadS32(&vertexCount);
+        desktop->sizes[index] = static_cast<u32>(size);
+        desktop->vertexCounts[index] = static_cast<u32>(vertexCount);
+        desktop->vertexTotal += desktop->vertexCounts[index];
+        desktop->packets[index] = ReadPacketBytes(stream, desktop->sizes[index]);
+    }
+
+    Log("ReadSkin %p submodels=%u vertexes=%u", desktop, desktop->count, desktop->vertexTotal);
 }
 
+// A blend skin's submodels: each one's material and its parts (their shapes' vertex data), and how many shapes they blend
 BlendSkin* NewBlendSkin(u32 id)
 {
-    void* memory = MemoryAllocate(0x18);
-    if (memory == nullptr)
+    auto* skin = static_cast<DesktopGraphics::BlendSkin*>(MemoryAllocate(sizeof(DesktopGraphics::BlendSkin)));
+    if (skin == nullptr)
     {
         return nullptr;
     }
 
-    std::memset(memory, 0, 0x18);
-    ConstructResourceHeader(memory, id);
-    return static_cast<BlendSkin*>(memory);
+    std::memset(skin, 0, sizeof(DesktopGraphics::BlendSkin));
+    ConstructResourceHeader(skin, id);
+    return reinterpret_cast<BlendSkin*>(skin);
 }
 
 void DeleteBlendSkin(BlendSkin* skin)
 {
-    if (skin != nullptr)
+    auto* desktop = reinterpret_cast<DesktopGraphics::BlendSkin*>(skin);
+    if (desktop == nullptr)
     {
-        MemoryDeallocate2_(skin);
+        return;
     }
+
+    for (u32 index = 0; index < desktop->count; index++)
+    {
+        if (desktop->materials != nullptr && desktop->materials[index] != nullptr)
+        {
+            g_MaterialTable.ReleaseItem(reinterpret_cast<MaterialResource*>(desktop->materials[index]));
+        }
+
+        if (desktop->subModels != nullptr)
+        {
+            DestroyBlendSubModel(desktop->subModels[index]);
+        }
+    }
+
+    if (desktop->materials != nullptr)
+    {
+        MemoryDeallocate2_(desktop->materials);
+    }
+    if (desktop->subModels != nullptr)
+    {
+        MemoryDeallocate2_(desktop->subModels);
+    }
+
+    MemoryDeallocate2_(desktop);
 }
 
 void ReadBlendSkin(BlendSkin* skin, Stream* stream)
 {
+    auto* desktop = reinterpret_cast<DesktopGraphics::BlendSkin*>(skin);
+    s32 count = 0;
+    stream->ReadS32(&count);
+    desktop->count = static_cast<u32>(count);
+    s32 shapeCount = 0;
+    stream->ReadS32(&shapeCount);
+    desktop->shapeCount = static_cast<u32>(shapeCount);
+
+    desktop->materials = AllocateItems<DesktopGraphics::MaterialResource*>(desktop->count);
+    desktop->subModels = AllocateItems<DesktopGraphics::BlendSubModel*>(desktop->count);
+    for (u32 index = 0; index < desktop->count; index++)
+    {
+        s32 partCount = 0;
+        stream->ReadS32(&partCount);
+        u32 id = 0;
+        stream->ReadS32(reinterpret_cast<s32*>(&id));
+        desktop->materials[index] = reinterpret_cast<DesktopGraphics::MaterialResource*>(g_MaterialTable.Acquire(&id, nullptr));
+
+        auto* subModel = static_cast<DesktopGraphics::BlendSubModel*>(MemoryAllocate(sizeof(DesktopGraphics::BlendSubModel)));
+        if (subModel != nullptr)
+        {
+            subModel->parts = nullptr;
+            subModel->count = static_cast<u32>(partCount);
+            ReadBlendParts(subModel, stream, desktop->shapeCount);
+        }
+
+        desktop->subModels[index] = subModel;
+    }
+
+    Log("ReadBlendSkin %p submodels=%u shapes=%u", desktop, desktop->count, desktop->shapeCount);
 }
 
+// The meshes of the scenery (a rigid model too, read the same way as the OGIs' models)
 RigidModel* NewMesh(u32 id)
 {
-    void* memory = MemoryAllocate(0x20);
-    if (memory == nullptr)
+    auto* mesh = static_cast<DesktopGraphics::RigidModel*>(MemoryAllocate(sizeof(DesktopGraphics::RigidModel)));
+    if (mesh == nullptr)
     {
         return nullptr;
     }
 
-    std::memset(memory, 0, 0x20);
-    ConstructResourceHeader(memory, id);
-    return static_cast<RigidModel*>(memory);
+    std::memset(mesh, 0, sizeof(DesktopGraphics::RigidModel));
+    ConstructResourceHeader(mesh, id);
+    return reinterpret_cast<RigidModel*>(mesh);
 }
 
 void DeleteMesh(RigidModel* mesh)
 {
-    if (mesh != nullptr)
-    {
-        MemoryDeallocate2_(mesh);
-    }
+    DestroyRigidModel(reinterpret_cast<DesktopGraphics::RigidModel*>(mesh));
 }
 
 void ReadMesh(RigidModel* mesh, Stream* stream)
 {
+    auto* desktop = reinterpret_cast<DesktopGraphics::RigidModel*>(mesh);
+    s32 version = 0;
+    stream->ReadS32(&version);
+    ReadRigidModelData(desktop, stream);
+
+    Log("ReadMesh %p version=%d submodels=%u modelId=%08X", desktop, version, desktop->count, desktop->modelId);
 }
 
-// The levels of detail and the skies are the platform's (their kinds' Item types are complete only there), and their sizes the
-// PS2's (renderer.h's 0x24 and 0x50 bytes): their headers at the front, the rest zeroed
-constexpr u32 LodBytes = 0x24;
-constexpr u32 SkyBytes = 0x50;
-
+// The levels of detail and the skies: the meshes they name, and the squares of the LOD's distances (its file's version says
+// whether the distances are the squares already, 0x1002, or the plain distances, 0x1001)
 Lod* NewLod(u32 id)
 {
-    void* memory = MemoryAllocate(LodBytes);
-    if (memory == nullptr)
+    auto* lod = static_cast<DesktopGraphics::Lod*>(MemoryAllocate(sizeof(DesktopGraphics::Lod)));
+    if (lod == nullptr)
     {
         return nullptr;
     }
 
-    std::memset(memory, 0, LodBytes);
-    ConstructResourceHeader(memory, id);
-    return static_cast<Lod*>(memory);
+    std::memset(lod, 0, sizeof(DesktopGraphics::Lod));
+    ConstructResourceHeader(lod, id);
+    return reinterpret_cast<Lod*>(lod);
 }
 
 void DeleteLod(Lod* lod)
 {
-    if (lod != nullptr)
+    auto* desktop = reinterpret_cast<DesktopGraphics::Lod*>(lod);
+    if (desktop == nullptr)
     {
-        MemoryDeallocate2_(lod);
+        return;
     }
+
+    for (u32 index = 0; index < desktop->count; index++)
+    {
+        if (desktop->meshes != nullptr && desktop->meshes[index] != nullptr)
+        {
+            g_MeshTable.ReleaseItem(reinterpret_cast<RigidModel*>(desktop->meshes[index]));
+        }
+    }
+
+    if (desktop->meshes != nullptr)
+    {
+        MemoryDeallocate2_(desktop->meshes);
+    }
+
+    MemoryDeallocate2_(desktop);
 }
 
 void ReadLod(Lod* lod, Stream* stream)
 {
+    auto* desktop = reinterpret_cast<DesktopGraphics::Lod*>(lod);
+    constexpr s32 DistancesVersion = 0x1001;
+    constexpr s32 SquaresVersion = 0x1002;
+
+    s32 version = 0;
+    stream->ReadS32(&version);
+    if (version == DistancesVersion)
+    {
+        u32 count = 0;
+        stream->ReadU32(&count);
+        desktop->count = static_cast<u8>(count);
+        desktop->meshes = AllocateItems<DesktopGraphics::RigidModel*>(desktop->count);
+
+        stream->ReadS32(reinterpret_cast<s32*>(&desktop->nearest));
+        desktop->nearest *= desktop->nearest;
+        stream->ReadS32(reinterpret_cast<s32*>(&desktop->farthest));
+        if (desktop->farthest != 0xFFFFFFFF)
+        {
+            desktop->farthest *= desktop->farthest;
+        }
+
+        for (u32 distance = 0; distance < DesktopGraphics::Lod::MostSwitches; distance++)
+        {
+            stream->ReadS32(reinterpret_cast<s32*>(&desktop->switchDistances[distance]));
+            desktop->switchDistances[distance] *= desktop->switchDistances[distance];
+        }
+
+        s32 unused = 0;
+        stream->ReadS32(&unused);
+        ReadMeshIds(desktop->meshes, desktop->count, stream);
+    }
+    else if (version == SquaresVersion)
+    {
+        s8 count = 0;
+        stream->ReadS8(&count);
+        desktop->count = static_cast<u8>(count);
+        desktop->meshes = AllocateItems<DesktopGraphics::RigidModel*>(desktop->count);
+
+        stream->ReadS32(reinterpret_cast<s32*>(&desktop->nearest));
+        stream->ReadS32(reinterpret_cast<s32*>(&desktop->farthest));
+        stream->Read(desktop->switchDistances, sizeof(desktop->switchDistances), 1);
+        ReadMeshIds(desktop->meshes, desktop->count, stream);
+    }
+
+    Log("ReadLod %p version=%d meshes=%u nearest=%u farthest=%u", desktop, version, desktop->count, desktop->nearest,
+        desktop->farthest);
 }
 
 Sky* NewSky(u32 id)
 {
-    void* memory = MemoryAllocate(SkyBytes);
-    if (memory == nullptr)
+    auto* sky = static_cast<DesktopGraphics::Sky*>(MemoryAllocate(sizeof(DesktopGraphics::Sky)));
+    if (sky == nullptr)
     {
         return nullptr;
     }
 
-    std::memset(memory, 0, SkyBytes);
-    ConstructResourceHeader(memory, id);
-    return static_cast<Sky*>(memory);
+    std::memset(sky, 0, sizeof(DesktopGraphics::Sky));
+    ConstructResourceHeader(sky, id);
+    return reinterpret_cast<Sky*>(sky);
 }
 
 void DeleteSky(Sky* sky)
 {
-    if (sky != nullptr)
+    auto* desktop = reinterpret_cast<DesktopGraphics::Sky*>(sky);
+    if (desktop == nullptr)
     {
-        MemoryDeallocate2_(sky);
+        return;
     }
+
+    for (u32 index = 0; index < desktop->count; index++)
+    {
+        if (desktop->models != nullptr && desktop->models[index] != nullptr)
+        {
+            g_MeshTable.ReleaseItem(reinterpret_cast<RigidModel*>(desktop->models[index]));
+        }
+    }
+
+    if (desktop->models != nullptr)
+    {
+        MemoryDeallocate2_(desktop->models);
+    }
+
+    MemoryDeallocate2_(desktop);
 }
 
 void ReadSky(Sky* sky, Stream* stream)
 {
+    auto* desktop = reinterpret_cast<DesktopGraphics::Sky*>(sky);
+    s32 unused = 0;
+    stream->ReadS32(&unused);
+    s32 count = 0;
+    stream->ReadS32(&count);
+    desktop->count = static_cast<u32>(count);
+    desktop->models = AllocateItems<DesktopGraphics::RigidModel*>(desktop->count);
+    ReadMeshIds(desktop->models, desktop->count, stream);
+
+    Log("ReadSky %p meshes=%u", desktop, desktop->count);
 }
 
 void DrawChunkSky(Sky* sky, RenderView* view)
 {
+    // A chunk with a sky doesn't set its frame up through SetUpFrame (on the PS2 the sky's own half-size buffer replaces that
+    // setup, renderer/sky.cpp): this is where the frame is cleared. Without it nothing clears between frames and each one smears
+    // over the last
+    SdlGfx::Clear(g_ClearColor[0], g_ClearColor[1], g_ClearColor[2]);
+
+    auto* desktop = reinterpret_cast<DesktopGraphics::Sky*>(sky);
+    if (desktop == nullptr || desktop->models == nullptr || view == nullptr)
+    {
+        return;
+    }
+
+    // The sky turns with the camera but doesn't move with it: its meshes are drawn as though the camera sat at the world's origin,
+    // so the camera's place goes in front of the view's own matrix to the screen (the PS2's DrawSky composes it the same way)
+    Matrix4x4 translation;
+    InitIdentityMatrix(&translation);
+    Reference* reference = view->cameraObject;
+    ObjectPlace* place = reference != nullptr && reference->object != nullptr ? reference->object->place : nullptr;
+    if (place != nullptr)
+    {
+        translation.m[3][0] = place->matrix.m[3][0];
+        translation.m[3][1] = place->matrix.m[3][1];
+        translation.m[3][2] = place->matrix.m[3][2];
+        translation.m[3][3] = place->matrix.m[3][3];
+    }
+
+    Matrix4x4 toScreen;
+    VuMultiplyMatrices(&translation, &view->toScreen, &toScreen);
+
+    for (u32 index = 0; index < desktop->count; index++)
+    {
+        if (desktop->models[index] != nullptr)
+        {
+            // The background never writes depth: the scene drawn after it comes over the top
+            DrawRigidModelToScreen(reinterpret_cast<RigidModel*>(desktop->models[index]), &toScreen, false);
+        }
+    }
 }
 
 void LoadParticlePage(ParticlePage* page, const char* path, bool decals)

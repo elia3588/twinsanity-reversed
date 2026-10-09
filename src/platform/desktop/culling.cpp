@@ -256,6 +256,11 @@ void ChunkViewPlanes(const Matrix4x4* matrix, Vector4* sides, Vector4* nearPlane
 
     TransformPlaneOf(g_ViewPlanes, NearPlane, matrix, nearPlane);
 }
+
+const Matrix4x4* ViewToScreen()
+{
+    return &g_ToScreen;
+}
 }
 
 namespace Platform::Graphics

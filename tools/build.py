@@ -50,7 +50,30 @@ def configure():
     subprocess.run(PYTHON + ["configure.py", "--platform", PLATFORM], cwd=HERE, check=True)
 
 
+def compiler_directory():
+    """Where the desktop build's compiler is (its line in the ninja file): its runtime's DLLs have to be on PATH or the
+    assembler and linker it starts fail silently on Windows"""
+    try:
+        text = (HERE / NINJA_FILE).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+    for line in text.splitlines():
+        if line.startswith("cxx = "):
+            value = line[len("cxx = "):].strip()
+            if value.startswith('"') and value.endswith('"'):
+                value = value[1:-1]
+            return Path(value).parent
+
+    return None
+
+
 def run_ninja(arguments):
+    if PLATFORM == "desktop" and os.name == "nt":
+        directory = compiler_directory()
+        if directory is not None:
+            os.environ["PATH"] = str(directory) + os.pathsep + os.environ.get("PATH", "")
+
     return subprocess.run(ninja() + ["-f", NINJA_FILE] + arguments, cwd=HERE).returncode
 
 
