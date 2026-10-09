@@ -433,6 +433,7 @@ void FreeDecodedSkinSubModel(DesktopGraphics::DecodedSkinSubModel* decoded)
     std::free(decoded->jointIndices);
     std::free(decoded->jointWeights);
     std::free(decoded->jointAmounts);
+    std::free(decoded->jointNoDraw);
     std::free(decoded);
 }
 
@@ -461,11 +462,12 @@ DesktopGraphics::DecodedSkinSubModel* DecodeSkinSubModel(const u8* packet, u32 s
     decoded->jointIndices = AllocateDecoded<s32>(vertexCount * 3);
     decoded->jointWeights = AllocateDecoded<f32>(vertexCount * 3);
     decoded->jointAmounts = AllocateDecoded<u8>(vertexCount);
+    decoded->jointNoDraw = AllocateDecoded<u8>(vertexCount);
     decoded->stripStarts = AllocateDecoded<u32>(vertexCount);
     decoded->stripCounts = AllocateDecoded<u32>(vertexCount);
     if (decoded->positions == nullptr || decoded->textureCoordinates == nullptr || decoded->colours == nullptr ||
         decoded->jointIndices == nullptr || decoded->jointWeights == nullptr || decoded->jointAmounts == nullptr ||
-        decoded->stripStarts == nullptr || decoded->stripCounts == nullptr)
+        decoded->jointNoDraw == nullptr || decoded->stripStarts == nullptr || decoded->stripCounts == nullptr)
     {
         FreeDecodedSkinSubModel(decoded);
         return nullptr;
@@ -484,6 +486,7 @@ DesktopGraphics::DecodedSkinSubModel* DecodeSkinSubModel(const u8* packet, u32 s
         decoded->jointWeights[index * 3 + 1] = 0.0f;
         decoded->jointWeights[index * 3 + 2] = 0.0f;
         decoded->jointAmounts[index] = 1;
+        decoded->jointNoDraw[index] = 0;
     }
 
     const u32* words = reinterpret_cast<const u32*>(packet);
@@ -597,6 +600,7 @@ DesktopGraphics::DecodedSkinSubModel* DecodeSkinSubModel(const u8* packet, u32 s
                     decoded->jointWeights[at * 3 + 1] = AsFloat(joint1 & ~0x1FFu);
                     decoded->jointWeights[at * 3 + 2] = AsFloat(joint2 & ~0x1FFu);
                     decoded->jointAmounts[at] = static_cast<u8>(amount);
+                    decoded->jointNoDraw[at] = (data[base + 3] & 0x8000) != 0 ? 1 : 0;
                 }
                 else if (address == 6)
                 {
@@ -1437,10 +1441,9 @@ void ClipToScreen(const ClipVertex& clip, f32 across, f32 down, SdlGfx::Vertex3D
     out->blue = ScaleChannel(static_cast<u8>((clip.colour >> 16) & 0xFF), 192);
     out->alpha = ScaleChannel(static_cast<u8>((clip.colour >> 24) & 0xFF), 128);
     out->u = clip.u;
-    // The decoded textures' rows run bottom-up (the SDL image's row 0 is the game texture's bottom, the 2D drawers and the
-    // font turn their source areas about for it): the game's own v (0 at a texture's top) is turned about to sample the row
-    // the game means, as the 2D's do
-    out->v = 1.0f - clip.v;
+    // The game texture's row 0 (v 0) is the decoded image's row 0, which the SDL texture keeps as its own row 0 (its t 0): the
+    // model's v samples the row the game means as it is (the 2D drawers' "turned" path serves a top-down source area, not this)
+    out->v = clip.v;
 }
 }
 
@@ -1577,6 +1580,7 @@ void DrawDecodedSkinSubModel(DesktopGraphics::DecodedSkinSubModel* decoded, void
     for (u32 strip = 0; strip < decoded->stripCount; strip++)
     {
         u32 count = decoded->stripCounts[strip];
+        u32 stripStart = decoded->stripStarts[strip];
         if (count < 3)
         {
             continue;
@@ -1594,7 +1598,7 @@ void DrawDecodedSkinSubModel(DesktopGraphics::DecodedSkinSubModel* decoded, void
         bool behind = false;
         for (u32 index = 0; index < count; index++)
         {
-            u32 vertex = decoded->stripStarts[strip] + index;
+            u32 vertex = stripStart + index;
             Vector4 base = decoded->positions[vertex];
             if (blend != nullptr)
             {
@@ -1669,12 +1673,17 @@ void DrawDecodedSkinSubModel(DesktopGraphics::DecodedSkinSubModel* decoded, void
                 ClipToScreen(clips[index], across, down, &screen[index]);
             }
 
-            SdlGfx::DrawTriangleStrip3D(texture, screen, count, writeDepth);
+            SdlGfx::DrawTriangleStrip3D(texture, screen, count, writeDepth, decoded->jointNoDraw + stripStart);
         }
         else
         {
             for (u32 index = 0; index + 2 < count; index++)
             {
+                if (decoded->jointNoDraw[stripStart + index + 2] != 0)
+                {
+                    continue;   // the triangle ending at a no-draw vertex is one the GS draws not either
+                }
+
                 ClipVertex triangle[3] = {clips[index], clips[index + 1], clips[index + 2]};
                 ClipVertex polygon[4];
                 u32 vertices = ClipTriangleToCamera(triangle, polygon);

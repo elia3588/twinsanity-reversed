@@ -45,8 +45,11 @@ struct Vertex3D
 };
 // The same strip as DrawTriangleStrip, over triangles that depth-test against each other and against the frame's depth.
 // The depth isn't written when writeDepth is clear: a background (a sky) tests against the frame's depth without ever hiding
-// what's drawn after it
-void DrawTriangleStrip3D(void* texture, const Vertex3D* vertices, u32 count, bool writeDepth = true);
+// what's drawn after it. When noDraw isn't nullptr it holds one flag a vertex: the PS2's GS draws no triangle for a vertex whose
+// flag is set, so the triangle ending at it (its previous two vertexes and it) is left out (the game's packed strips, quad
+// lists widened into strips, mark the connecting vertexes so)
+void DrawTriangleStrip3D(void* texture, const Vertex3D* vertices, u32 count, bool writeDepth = true,
+                         const u8* noDraw = nullptr);
 // The texture drawn in the window: the destination's and the source's rectangles in pixels, and the tint its pixels are
 // modulated by
 void DrawTexture(void* texture, s32 dstX, s32 dstY, s32 dstWidth, s32 dstHeight, s32 srcX, s32 srcY, s32 srcWidth, s32 srcHeight,

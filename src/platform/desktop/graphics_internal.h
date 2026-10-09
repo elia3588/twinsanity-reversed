@@ -107,6 +107,7 @@ struct DecodedSkinSubModel
     s32* jointIndices;      // three a vertex
     f32* jointWeights;      // three a vertex
     u8* jointAmounts;       // one a vertex
+    u8* jointNoDraw;        // one a vertex: the joint word's VertexNoDraw bit, the vertex draws no triangle
 };
 
 // A model (a rigid model's submodels): how many, each one's vertex count, the size of its packet, the size of the data the file

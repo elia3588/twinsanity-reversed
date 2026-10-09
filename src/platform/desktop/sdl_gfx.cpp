@@ -92,13 +92,16 @@ void Quad(s32 x, s32 y, s32 width, s32 height, const Texture* texture, s32 srcX,
     glEnd();
 }
 
-void BindTexture(const Texture* texture)
+void BindTexture(const Texture* texture, bool repeat = false)
 {
     if (texture != nullptr)
     {
         glEnable(GL_TEXTURE_2D);
         glBindTexture(GL_TEXTURE_2D, texture->id);
         glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+        const GLint wrap = repeat ? GL_REPEAT : GL_CLAMP_TO_EDGE;
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap);
     }
     else
     {
@@ -218,7 +221,7 @@ void DrawTriangleStrip(void* handle, const Vertex* vertices, u32 count)
     glDisable(GL_TEXTURE_2D);
 }
 
-void DrawTriangleStrip3D(void* handle, const Vertex3D* vertices, u32 count, bool writeDepth)
+void DrawTriangleStrip3D(void* handle, const Vertex3D* vertices, u32 count, bool writeDepth, const u8* noDraw)
 {
     if (!Ready() || vertices == nullptr || count < 3)
     {
@@ -230,15 +233,40 @@ void DrawTriangleStrip3D(void* handle, const Vertex3D* vertices, u32 count, bool
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LEQUAL);
     glDepthMask(writeDepth ? GL_TRUE : GL_FALSE);
-    BindTexture(static_cast<const Texture*>(handle));
-    glBegin(GL_TRIANGLE_STRIP);
-    for (u32 vertex = 0; vertex < count; vertex++)
+    BindTexture(static_cast<const Texture*>(handle), true);
+    // A vertex whose no-draw flag is set takes no triangle: the triangle it would have closed with the two before it is left out,
+    // the strip's own winding kept exactly (GL_TRIANGLES emits each kept triangle with the same vertex order)
+    if (noDraw != nullptr)
     {
-        glColor4ub(vertices[vertex].red, vertices[vertex].green, vertices[vertex].blue, vertices[vertex].alpha);
-        glTexCoord2f(vertices[vertex].u, vertices[vertex].v);
-        glVertex3f(vertices[vertex].x, vertices[vertex].y, vertices[vertex].z);
+        glBegin(GL_TRIANGLES);
+        for (u32 index = 2; index < count; index++)
+        {
+            if (noDraw[index] != 0)
+            {
+                continue;
+            }
+
+            for (u32 corner = 0; corner < 3; corner++)
+            {
+                const Vertex3D& vertex = vertices[index - 2 + corner];
+                glColor4ub(vertex.red, vertex.green, vertex.blue, vertex.alpha);
+                glTexCoord2f(vertex.u, vertex.v);
+                glVertex3f(vertex.x, vertex.y, vertex.z);
+            }
+        }
+        glEnd();
     }
-    glEnd();
+    else
+    {
+        glBegin(GL_TRIANGLE_STRIP);
+        for (u32 vertex = 0; vertex < count; vertex++)
+        {
+            glColor4ub(vertices[vertex].red, vertices[vertex].green, vertices[vertex].blue, vertices[vertex].alpha);
+            glTexCoord2f(vertices[vertex].u, vertices[vertex].v);
+            glVertex3f(vertices[vertex].x, vertices[vertex].y, vertices[vertex].z);
+        }
+        glEnd();
+    }
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_TEXTURE_2D);
 }
@@ -285,7 +313,7 @@ void* CreateTexture(const void*, int, int) { return nullptr; }
 void DestroyTexture(void*) {}
 void FillRect(int, int, int, int, u8, u8, u8, u8) {}
 void DrawTriangleStrip(void*, const Vertex*, u32) {}
-void DrawTriangleStrip3D(void*, const Vertex3D*, u32) {}
+void DrawTriangleStrip3D(void*, const Vertex3D*, u32, bool, const u8*) {}
 void DrawTexture(void*, int, int, int, int, int, int, int, int, u8, u8, u8, u8) {}
 void DrawTextureFlipped(void*, int, int, int, int, int, int, int, int, u8, u8, u8, u8) {}
 }
