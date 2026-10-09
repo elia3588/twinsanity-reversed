@@ -220,10 +220,11 @@ PlaneTest TestPlanes(const PlaneColumns& planes, const Vector4& middle, const Ve
 {
     Vector4 reach = Weighed(planes.absoluteNormals, half);
     Vector4 distance = Sum(Weighed(planes.normals, middle), planes.offsets);
-    // Small epsilon to match PS2 VU0 precision and avoid flickering at plane boundaries
+    // Small epsilon added to distance/reach to avoid flickering at plane boundaries (PS2 VU0 precision)
     constexpr f32 Epsilon = 0.001f;
-    return {SignBits(Difference(Sum(distance, reach), {Epsilon, Epsilon, Epsilon, Epsilon})),
-            SignBits(Difference(Difference(distance, reach), {Epsilon, Epsilon, Epsilon, Epsilon}))};
+    Vector4 epsilonVec = {Epsilon, Epsilon, Epsilon, Epsilon};
+    return {SignBits(Sum(Sum(distance, reach), epsilonVec)),
+            SignBits(Sum(Difference(distance, reach), epsilonVec))};
 }
 
 // Planes taken into a model's space: each normal's share along the model's axes, the offset at the model's place
