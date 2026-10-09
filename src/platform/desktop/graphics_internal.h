@@ -91,6 +91,24 @@ struct DecodedSubModel
     u32* colours;
 };
 
+// A skin submodel's packet decoded into host geometry (the VU1 skinning programme's vertexes): the strips it's cut into (each a
+// triangle strip, a run of the arrays below), and the arrays every strip shares. The positions are the bind pose in 16 bit
+// components packed with the batch's scale and offset (the W holds the X of the vertex's normal); the texture coordinates hold
+// the UVs in X and Y and the normal's Y and Z in Z and W. Every vertex carries the joints and weights the programme blends it by
+struct DecodedSkinSubModel
+{
+    u32 vertexCount;
+    u32 stripCount;
+    u32* stripStarts;
+    u32* stripCounts;
+    Vector4* positions;
+    Vector4* textureCoordinates;
+    u32* colours;
+    s32* jointIndices;      // three a vertex
+    f32* jointWeights;      // three a vertex
+    u8* jointAmounts;       // one a vertex
+};
+
 // A model (a rigid model's submodels): how many, each one's vertex count, the size of its packet, the size of the data the file
 // has after its packet (read and dropped alone) and the packets' bytes, kept as the file has them (the decode happens when the
 // model is drawn, cached here)
@@ -127,7 +145,7 @@ struct RigidModel
 };
 
 // A skin as an OGI draws it: its submodels' materials, vertex counts and packets, how many, their packets' sizes, and the
-// vertexes all of them have
+// vertexes all of them have (the decode happens when the skin is drawn, cached here)
 struct Skin
 {
     ResourceHeader header;
@@ -137,6 +155,7 @@ struct Skin
     u32 count;
     u32* sizes;
     u32 vertexTotal;
+    DecodedSkinSubModel** decoded;
 };
 
 // A part of a blend skin's submodel: each of its shapes' vertex data (a heap block each, its size in quadwords and how many

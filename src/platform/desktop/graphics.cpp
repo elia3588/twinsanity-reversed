@@ -412,6 +412,297 @@ DesktopGraphics::DecodedSubModel* DecodedSubModelOf(DesktopGraphics::Model* mode
     return model->decoded[subModel];
 }
 
+// A 16 bit component of a skin's packed position or coordinate, sign extended the way VIF unpacks it
+s32 SignExtend16(u32 value)
+{
+    return static_cast<s32>(static_cast<s16>(value & 0xFFFF));
+}
+
+void FreeDecodedSkinSubModel(DesktopGraphics::DecodedSkinSubModel* decoded)
+{
+    if (decoded == nullptr)
+    {
+        return;
+    }
+
+    std::free(decoded->stripStarts);
+    std::free(decoded->stripCounts);
+    std::free(decoded->positions);
+    std::free(decoded->textureCoordinates);
+    std::free(decoded->colours);
+    std::free(decoded->jointIndices);
+    std::free(decoded->jointWeights);
+    std::free(decoded->jointAmounts);
+    std::free(decoded);
+}
+
+// One skin submodel's packet decoded (the VU1 skinning programme's vertexes): the VIF batches the game's tools packed, each strip's
+// positions and coordinates 16 bit, scaled by the batch's own scale (VU1 address 2) and offset by its row registers (offset mode's
+// STROW), the joints and weights the skinning programme blends the vertexes by (VU1 address 5), and the colours (address 6). The
+// positions hold the normal's X in their W, the coordinates the normal's Y and Z in their Z and W. Null when the packet isn't the
+// shape expected (the submodel isn't drawn)
+DesktopGraphics::DecodedSkinSubModel* DecodeSkinSubModel(const u8* packet, u32 size, u32 vertexCount)
+{
+    if (packet == nullptr || size < 16 || vertexCount == 0)
+    {
+        return nullptr;
+    }
+
+    auto* decoded = static_cast<DesktopGraphics::DecodedSkinSubModel*>(std::malloc(sizeof(DesktopGraphics::DecodedSkinSubModel)));
+    if (decoded == nullptr)
+    {
+        return nullptr;
+    }
+
+    std::memset(decoded, 0, sizeof(*decoded));
+    decoded->positions = AllocateDecoded<Vector4>(vertexCount);
+    decoded->textureCoordinates = AllocateDecoded<Vector4>(vertexCount);
+    decoded->colours = AllocateDecoded<u32>(vertexCount);
+    decoded->jointIndices = AllocateDecoded<s32>(vertexCount * 3);
+    decoded->jointWeights = AllocateDecoded<f32>(vertexCount * 3);
+    decoded->jointAmounts = AllocateDecoded<u8>(vertexCount);
+    decoded->stripStarts = AllocateDecoded<u32>(vertexCount);
+    decoded->stripCounts = AllocateDecoded<u32>(vertexCount);
+    if (decoded->positions == nullptr || decoded->textureCoordinates == nullptr || decoded->colours == nullptr ||
+        decoded->jointIndices == nullptr || decoded->jointWeights == nullptr || decoded->jointAmounts == nullptr ||
+        decoded->stripStarts == nullptr || decoded->stripCounts == nullptr)
+    {
+        FreeDecodedSkinSubModel(decoded);
+        return nullptr;
+    }
+
+    // A submodel without a colour UNPACK keeps white, and a vertex without a joint keeps the first (the skins the tools packed all
+    // carry the four addresses, so these are only the safety of an unexpected packet)
+    for (u32 index = 0; index < vertexCount; index++)
+    {
+        decoded->colours[index] = 0xFFFFFFFF;
+        decoded->textureCoordinates[index] = Vector4{0.0f, 0.0f, 0.0f, 1.0f};
+        decoded->jointIndices[index * 3 + 0] = 0;
+        decoded->jointIndices[index * 3 + 1] = 0;
+        decoded->jointIndices[index * 3 + 2] = 0;
+        decoded->jointWeights[index * 3 + 0] = 1.0f;
+        decoded->jointWeights[index * 3 + 1] = 0.0f;
+        decoded->jointWeights[index * 3 + 2] = 0.0f;
+        decoded->jointAmounts[index] = 1;
+    }
+
+    const u32* words = reinterpret_cast<const u32*>(packet);
+    const u32 wordCount = size / 4;
+    u32 word = 2;       // the DMA tag (the size word and its zero), the codes follow
+    u32 vertex = 0;
+    u32 strip = 0;
+    u32 stripStart = 0;
+    u32 row[4] = {0, 0, 0, 0};
+    f32 positionScale = 1.0f / 16384.0f;
+    f32 uvScale = 1.0f / 2048.0f;
+    bool offsetMode = false;
+    bool started = false;
+    bool ok = true;
+
+    while (word < wordCount && ok)
+    {
+        const u32 code = words[word];
+        const u32 command = (code >> 24) & 0xFF;
+        if (command >= 0x60 && command <= 0x6F)
+        {
+            const u32 components = UnpackComponents(command);
+            const u32 elementSize = UnpackElementSize(command, components);
+            const u32 count = (code >> 16) & 0xFF;
+            const u32 address = code & 0x3FFF;
+            if (word + 1 + elementSize * count > wordCount)
+            {
+                ok = false;
+                break;
+            }
+
+            const u32* data = &words[word + 1];
+            if (address == 0)
+            {
+                // An unpack to address 0 (the GIF tag) starts the next strip: the one before it is done
+                if (started && vertex > stripStart)
+                {
+                    decoded->stripStarts[strip] = stripStart;
+                    decoded->stripCounts[strip] = vertex - stripStart;
+                    strip++;
+                }
+                stripStart = vertex;
+                started = true;
+            }
+
+            if (stripStart + count > vertexCount)
+            {
+                ok = false;
+                break;
+            }
+
+            for (u32 index = 0; index < count; index++)
+            {
+                const u32 base = index * elementSize;
+                const u32 at = stripStart + index;
+                if (address == 2)
+                {
+                    positionScale = AsFloat(data[0]);
+                    uvScale = AsFloat(data[1]);
+                }
+                else if (address == 3)
+                {
+                    s32 x = SignExtend16(data[base]);
+                    s32 y = SignExtend16(data[base] >> 16);
+                    s32 z = SignExtend16(data[base + 1]);
+                    s32 normalX = SignExtend16(data[base + 1] >> 16);
+                    if (offsetMode)
+                    {
+                        x += static_cast<s32>(row[0]);
+                        y += static_cast<s32>(row[1]);
+                        z += static_cast<s32>(row[2]);
+                        normalX += static_cast<s32>(row[3]);
+                    }
+                    decoded->positions[at] = Vector4{x * positionScale, y * positionScale, z * positionScale, normalX * positionScale};
+                }
+                else if (address == 4)
+                {
+                    s32 u = SignExtend16(data[base]);
+                    s32 v = SignExtend16(data[base] >> 16);
+                    s32 normalY = SignExtend16(data[base + 1]);
+                    s32 normalZ = SignExtend16(data[base + 1] >> 16);
+                    if (offsetMode)
+                    {
+                        u += static_cast<s32>(row[0]);
+                        v += static_cast<s32>(row[1]);
+                        normalY += static_cast<s32>(row[2]);
+                        normalZ += static_cast<s32>(row[3]);
+                    }
+                    decoded->textureCoordinates[at] = Vector4{u * uvScale, v * uvScale, normalY * uvScale, normalZ * uvScale};
+                }
+                else if (address == 5)
+                {
+                    // The weights are floats with the joint index times 4 in their lowest 9 bits, the fourth word holds how many
+                    const u32 joint0 = data[base + 0];
+                    const u32 joint1 = data[base + 1];
+                    const u32 joint2 = data[base + 2];
+                    u32 amount = data[base + 3] & 0xFF;
+                    if (amount == 0)
+                    {
+                        amount = 1;
+                    }
+                    else if (amount > 3)
+                    {
+                        amount = 3;
+                    }
+
+                    decoded->jointIndices[at * 3 + 0] = static_cast<s32>((joint0 & 0x1FF) / 4);
+                    decoded->jointIndices[at * 3 + 1] = static_cast<s32>((joint1 & 0x1FF) / 4);
+                    decoded->jointIndices[at * 3 + 2] = static_cast<s32>((joint2 & 0x1FF) / 4);
+                    decoded->jointWeights[at * 3 + 0] = AsFloat(joint0 & ~0x1FFu);
+                    decoded->jointWeights[at * 3 + 1] = AsFloat(joint1 & ~0x1FFu);
+                    decoded->jointWeights[at * 3 + 2] = AsFloat(joint2 & ~0x1FFu);
+                    decoded->jointAmounts[at] = static_cast<u8>(amount);
+                }
+                else if (address == 6)
+                {
+                    decoded->colours[at] = data[base];
+                }
+            }
+
+            if (address == 3)
+            {
+                vertex = stripStart + count;
+            }
+
+            word += 1 + elementSize * count;
+            continue;
+        }
+
+        switch (command)
+        {
+        case 0x00:  // NOP
+        case 0x01:  // STCYCL
+        case 0x04:  // ITOP
+        case 0x07:  // MARK
+        case 0x10:  // FLUSHA
+        case 0x11:  // FLUSH
+        case 0x13:  // FLUSHE
+        case 0x14:  // MSCAL
+        case 0x15:  // MSCALF
+        case 0x17:  // MSCNT
+            word += 1;
+            break;
+        case 0x05:  // STMOD: the row registers get added to the packed components in offset mode
+            offsetMode = (code & 3) == 1;
+            word += 1;
+            break;
+        case 0x30:  // STROW: the four row registers
+            if (word + 5 > wordCount)
+            {
+                ok = false;
+                break;
+            }
+            row[0] = words[word + 1];
+            row[1] = words[word + 2];
+            row[2] = words[word + 3];
+            row[3] = words[word + 4];
+            word += 5;
+            break;
+        case 0x31:  // STCOL
+            word += 5;
+            break;
+        case 0x20:  // STMASK
+            word += 2;
+            break;
+        default:
+            ok = false;
+            break;
+        }
+    }
+
+    if (ok && vertex > stripStart)
+    {
+        decoded->stripStarts[strip] = stripStart;
+        decoded->stripCounts[strip] = vertex - stripStart;
+        strip++;
+    }
+
+    if (!ok || vertex == 0)
+    {
+        FreeDecodedSkinSubModel(decoded);
+        return nullptr;
+    }
+
+    decoded->vertexCount = vertex;
+    decoded->stripCount = strip;
+    return decoded;
+}
+
+// The skin submodel's decode, made once and kept on the skin (graphics_internal.h)
+DesktopGraphics::DecodedSkinSubModel* DecodedSkinSubModelOf(DesktopGraphics::Skin* skin, u32 subModel)
+{
+    if (skin->decoded == nullptr)
+    {
+        skin->decoded = AllocateDecoded<DesktopGraphics::DecodedSkinSubModel*>(skin->count);
+        if (skin->decoded == nullptr)
+        {
+            return nullptr;
+        }
+
+        for (u32 index = 0; index < skin->count; index++)
+        {
+            skin->decoded[index] = nullptr;
+        }
+    }
+
+    if (subModel >= skin->count)
+    {
+        return nullptr;
+    }
+
+    if (skin->decoded[subModel] == nullptr && skin->packets != nullptr && skin->sizes != nullptr && skin->vertexCounts != nullptr)
+    {
+        skin->decoded[subModel] = DecodeSkinSubModel(skin->packets[subModel], skin->sizes[subModel], skin->vertexCounts[subModel]);
+    }
+
+    return skin->decoded[subModel];
+}
+
 // A material's shaders' animations started again (a model's materials are the game's own, graphics_internal.h's)
 void RestartMaterialAnimations(DesktopGraphics::MaterialResource* resource)
 {
@@ -1231,6 +1522,131 @@ void DrawDecodedSubModel(DesktopGraphics::DecodedSubModel* decoded, void* textur
     }
 }
 
+// One decoded skin submodel's strips drawn: each vertex is blended by its joints (the VU1 skinning programme's own work) into the
+// model's space, then taken to the GS's coordinates and the window's pixels and the game screen's, and drawn depth-tested. A strip
+// wholly in front of the camera is drawn in one go; one crossing the camera's own plane is clipped to it triangle by triangle
+void DrawDecodedSkinSubModel(DesktopGraphics::DecodedSkinSubModel* decoded, void* texture, const Matrix4x4* toScreen,
+                             const Matrix4x4* joints, u32 jointCount, bool writeDepth = true)
+{
+    if (decoded == nullptr || toScreen == nullptr || decoded->vertexCount == 0)
+    {
+        return;
+    }
+
+    s32 windowWidth = 0;
+    s32 windowHeight = 0;
+    SdlGfx::GetSize(&windowWidth, &windowHeight);
+    if (windowWidth <= 0 || windowHeight <= 0 || g_ScreenWidthPx <= 0 || g_ScreenHeightPx <= 0)
+    {
+        return;
+    }
+
+    f32 across = static_cast<f32>(windowWidth) / static_cast<f32>(g_ScreenWidthPx);
+    f32 down = static_cast<f32>(windowHeight) / static_cast<f32>(g_ScreenHeightPx);
+
+    for (u32 strip = 0; strip < decoded->stripCount; strip++)
+    {
+        u32 count = decoded->stripCounts[strip];
+        if (count < 3)
+        {
+            continue;
+        }
+
+        auto* clips = static_cast<ClipVertex*>(std::malloc(sizeof(ClipVertex) * count));
+        auto* screen = static_cast<SdlGfx::Vertex3D*>(std::malloc(sizeof(SdlGfx::Vertex3D) * (count + 1)));
+        if (clips == nullptr || screen == nullptr)
+        {
+            std::free(clips);
+            std::free(screen);
+            return;
+        }
+
+        bool behind = false;
+        for (u32 index = 0; index < count; index++)
+        {
+            u32 vertex = decoded->stripStarts[strip] + index;
+            const Vector4& bind = decoded->positions[vertex];
+            u8 amount = decoded->jointAmounts[vertex];
+            Vector4 posed = bind;
+            if (joints != nullptr)
+            {
+                Vector4 blended{0.0f, 0.0f, 0.0f, 0.0f};
+                f32 applied = 0.0f;
+                for (u32 joint = 0; joint < amount; joint++)
+                {
+                    s32 jointIndex = decoded->jointIndices[vertex * 3 + joint];
+                    if (jointIndex < 0 || static_cast<u32>(jointIndex) >= jointCount)
+                    {
+                        continue;
+                    }
+
+                    Vector4 transformed;
+                    VuTransformPoint(&joints[jointIndex], &bind, &transformed);
+                    f32 weight = decoded->jointWeights[vertex * 3 + joint];
+                    blended.x += weight * transformed.x;
+                    blended.y += weight * transformed.y;
+                    blended.z += weight * transformed.z;
+                    blended.w += weight * transformed.w;
+                    applied += weight;
+                }
+
+                if (applied != 0.0f)
+                {
+                    posed = blended;
+                }
+            }
+
+            Vector4 screenPos;
+            VuTransformPoint(toScreen, &posed, &screenPos);
+            ClipVertex& clip = clips[index];
+            clip.x = screenPos.x;
+            clip.y = screenPos.y;
+            clip.z = screenPos.z;
+            clip.w = screenPos.w;
+            clip.u = decoded->textureCoordinates[vertex].x;
+            clip.v = decoded->textureCoordinates[vertex].y;
+            clip.colour = decoded->colours[vertex];
+            if (screenPos.w < 0.0001f)
+            {
+                behind = true;
+            }
+        }
+
+        if (!behind)
+        {
+            for (u32 index = 0; index < count; index++)
+            {
+                ClipToScreen(clips[index], across, down, &screen[index]);
+            }
+
+            SdlGfx::DrawTriangleStrip3D(texture, screen, count, writeDepth);
+        }
+        else
+        {
+            for (u32 index = 0; index + 2 < count; index++)
+            {
+                ClipVertex triangle[3] = {clips[index], clips[index + 1], clips[index + 2]};
+                ClipVertex polygon[4];
+                u32 vertices = ClipTriangleToCamera(triangle, polygon);
+                if (vertices < 3)
+                {
+                    continue;
+                }
+
+                for (u32 vertex = 0; vertex < vertices; vertex++)
+                {
+                    ClipToScreen(polygon[vertex], across, down, &screen[vertex]);
+                }
+
+                SdlGfx::DrawTriangleStrip3D(texture, screen, vertices, writeDepth);
+            }
+        }
+
+        std::free(clips);
+        std::free(screen);
+    }
+}
+
 // A rigid model's submodels drawn with the model-to-screen matrix it's given (the model's own materials)
 void DrawRigidModelToScreen(RigidModel* model, const Matrix4x4* toScreen, bool writeDepth)
 {
@@ -1281,6 +1697,33 @@ void DrawRigidModel(RigidModel* model, const Matrix4x4* matrix, const ModelLight
 
 void DrawSkin(Skin* skin, const Matrix4x4* joints, u32 jointCount, const Matrix4x4* matrix, const ModelLights& lights, u32 mode)
 {
+    auto* desktop = reinterpret_cast<DesktopGraphics::Skin*>(skin);
+    if (desktop == nullptr || matrix == nullptr)
+    {
+        return;
+    }
+
+    // The matrix is the model's to the world; the view's to the screen makes the model's to the screen, the joints' own (the
+    // model's space) blending each vertex before it (what the PS2's VU1 gets in a skin's toScreen)
+    Matrix4x4 toScreen;
+    VuMultiplyMatrices(matrix, DesktopGraphics::ViewToScreen(), &toScreen);
+
+    for (u32 subModel = 0; subModel < desktop->count; subModel++)
+    {
+        DesktopGraphics::Material* material = nullptr;
+        if (desktop->materials != nullptr && desktop->materials[subModel] != nullptr)
+        {
+            material = desktop->materials[subModel]->material;
+        }
+
+        DesktopGraphics::Texture* texture = MaterialTexture(material);
+        DesktopGraphics::DecodedSkinSubModel* decoded = DecodedSkinSubModelOf(desktop, subModel);
+        DrawDecodedSkinSubModel(decoded, texture != nullptr ? texture->sdlTexture : nullptr, &toScreen, joints, jointCount);
+    }
+
+    // The lighting is VU1's for now; the colours the packets carry are drawn as they are
+    (void)lights;
+    (void)mode;
 }
 
 void DrawBlendSkin(BlendSkin* skin, const Matrix4x4* joints, u32 jointCount, const Matrix4x4* matrix, const ModelLights& lights, const f32* weights, const s32* shapes, s32 shapeCount, u32 mode)
@@ -1837,6 +2280,15 @@ void DeleteSkin(Skin* skin)
     if (desktop->sizes != nullptr)
     {
         MemoryDeallocate2_(desktop->sizes);
+    }
+
+    if (desktop->decoded != nullptr)
+    {
+        for (u32 index = 0; index < desktop->count; index++)
+        {
+            FreeDecodedSkinSubModel(desktop->decoded[index]);
+        }
+        std::free(desktop->decoded);
     }
 
     MemoryDeallocate2_(desktop);
