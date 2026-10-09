@@ -1383,25 +1383,82 @@ void DrawTurnedSprite(Material* material, u32 colour, const Vector2* corners, co
         return;
     }
 
-    f32 left = corners[0].x;
-    f32 top = corners[0].y;
-    f32 right = corners[0].x;
-    f32 bottom = corners[0].y;
-    for (u32 corner = 1; corner < 4; corner++)
+    s32 windowWidth = 0;
+    s32 windowHeight = 0;
+    SdlGfx::GetSize(&windowWidth, &windowHeight);
+    if (windowWidth <= 0 || windowHeight <= 0)
     {
-        left = std::min(left, corners[corner].x);
-        top = std::min(top, corners[corner].y);
-        right = std::max(right, corners[corner].x);
-        bottom = std::max(bottom, corners[corner].y);
+        return;
     }
 
-    Rectangle place;
-    place.x = left;
-    place.y = top;
-    place.width = right - left;
-    place.height = bottom - top;
+    u8 red = ScaleChannel(static_cast<u8>(colour & 0xFF), 192);
+    u8 green = ScaleChannel(static_cast<u8>((colour >> 8) & 0xFF), 192);
+    u8 blue = ScaleChannel(static_cast<u8>((colour >> 16) & 0xFF), 192);
+    u8 alpha = ScaleChannel(static_cast<u8>((colour >> 24) & 0xFF), 128);
 
-    DrawSprite(material, colour, place, texture);
+    auto* desktopMat = reinterpret_cast<DesktopGraphics::Material*>(material);
+    DesktopGraphics::Texture* tex = MaterialTexture(desktopMat);
+
+    if (tex != nullptr && tex->sdlTexture != nullptr)
+    {
+        // The corners array contains 4 pre-transformed corners in this order:
+        // 0: top-left, 1: bottom-left, 2: top-right, 3: bottom-right
+        // (same order as PS2: top-left, bottom-left, top-right, bottom-right)
+        // Map to texture coordinates:
+        // 0: (texture.x, texture.y + texture.height) - top-left
+        // 1: (texture.x, texture.y) - bottom-left
+        // 2: (texture.x + texture.width, texture.y + texture.height) - top-right
+        // 3: (texture.x + texture.width, texture.y) - bottom-right
+
+        // Convert corners to screen coordinates
+        f32 across = static_cast<f32>(windowWidth);
+        f32 down = static_cast<f32>(windowHeight);
+
+        SdlGfx::Vertex verts[4];
+        for (int i = 0; i < 4; i++)
+        {
+            verts[i].x = corners[i].x * across;
+            verts[i].y = corners[i].y * down;
+        }
+
+        // Texture coordinates in the same order
+        f32 texWidth = static_cast<f32>(tex->width);
+        f32 texHeight = static_cast<f32>(tex->height);
+        SdlGfx::Vertex texVerts[4];
+        texVerts[0].u = texture.x / texWidth;
+        texVerts[0].v = (texture.y + texture.height) / texHeight;
+        texVerts[1].u = texture.x / texWidth;
+        texVerts[1].v = texture.y / texHeight;
+        texVerts[2].u = (texture.x + texture.width) / texWidth;
+        texVerts[2].v = (texture.y + texture.height) / texHeight;
+        texVerts[3].u = (texture.x + texture.width) / texWidth;
+        texVerts[3].v = texture.y / texHeight;
+
+        SdlGfx::DrawTextureQuad(tex->sdlTexture, verts, texVerts, red, green, blue, alpha);
+    }
+    else
+    {
+        // Fallback: compute bounding box
+        f32 left = corners[0].x;
+        f32 top = corners[0].y;
+        f32 right = corners[0].x;
+        f32 bottom = corners[0].y;
+        for (u32 corner = 1; corner < 4; corner++)
+        {
+            left = std::min(left, corners[corner].x);
+            top = std::min(top, corners[corner].y);
+            right = std::max(right, corners[corner].x);
+            bottom = std::max(bottom, corners[corner].y);
+        }
+
+        Rectangle place;
+        place.x = left;
+        place.y = top;
+        place.width = right - left;
+        place.height = bottom - top;
+
+        DrawSprite(material, colour, place, texture);
+    }
 }
 
 void DrawStrip(Material* material, u32 count, const Vector2* places, const u32* colours)
@@ -1543,7 +1600,7 @@ void ClipToScreen(const ClipVertex& clip, f32 across, f32 down, SdlGfx::Vertex3D
 // One decoded submodel's strips drawn: each strip's vertexes are transformed by the model's matrix to the GS's coordinates, then
 // taken to the window's pixels and the game screen's, and drawn depth-tested. A strip wholly in front of the camera is drawn in
 // one go; one crossing the camera's own plane is clipped to it triangle by triangle, so the level's big faces aren't dropped whole
-void DrawDecodedSubModel(DesktopGraphics::DecodedSubModel* decoded, void* texture, const Matrix4x4* matrix, bool writeDepth = true)
+void DrawDecodedSubModel(DesktopGraphics::DecodedSubModel* decoded, void* texture, const Matrix4x4* matrix, bool writeDepth, DesktopGraphics::Material* material)
 {
     if (decoded == nullptr || matrix == nullptr || decoded->vertexCount == 0)
     {
@@ -1560,6 +1617,15 @@ void DrawDecodedSubModel(DesktopGraphics::DecodedSubModel* decoded, void* textur
 
     f32 across = static_cast<f32>(windowWidth) / static_cast<f32>(g_ScreenWidthPx);
     f32 down = static_cast<f32>(windowHeight) / static_cast<f32>(g_ScreenHeightPx);
+
+    // Get UV scroll offsets from material
+    f32 scrollU = 0.0f;
+    f32 scrollV = 0.0f;
+    if (material != nullptr && material->shaderCount != 0 && material->shaders[0] != nullptr)
+    {
+        scrollU = material->shaders[0]->scroll[0];
+        scrollV = material->shaders[0]->scroll[1];
+    }
 
     for (u32 strip = 0; strip < decoded->stripCount; strip++)
     {
@@ -1589,8 +1655,8 @@ void DrawDecodedSubModel(DesktopGraphics::DecodedSubModel* decoded, void* textur
             clip.y = transformed.y;
             clip.z = transformed.z;
             clip.w = transformed.w;
-            clip.u = decoded->textureCoordinates[vertex].x;
-            clip.v = decoded->textureCoordinates[vertex].y;
+            clip.u = decoded->textureCoordinates[vertex].x + scrollU;
+            clip.v = decoded->textureCoordinates[vertex].y + scrollV;
             clip.colour = decoded->colours[vertex];
             if (transformed.w < 0.0001f)
             {
@@ -1659,7 +1725,7 @@ struct BlendShapeState
 // model's space, then taken to the GS's coordinates and the window's pixels and the game screen's, and drawn depth-tested. A strip
 // wholly in front of the camera is drawn in one go; one crossing the camera's own plane is clipped to it triangle by triangle
 void DrawDecodedSkinSubModel(DesktopGraphics::DecodedSkinSubModel* decoded, void* texture, const Matrix4x4* toScreen,
-                             const Matrix4x4* joints, u32 jointCount, bool writeDepth = true, const BlendShapeState* blend = nullptr)
+                             const Matrix4x4* joints, u32 jointCount, bool writeDepth, DesktopGraphics::Material* material, const BlendShapeState* blend = nullptr)
 {
     if (decoded == nullptr || toScreen == nullptr || decoded->vertexCount == 0)
     {
@@ -1676,6 +1742,15 @@ void DrawDecodedSkinSubModel(DesktopGraphics::DecodedSkinSubModel* decoded, void
 
     f32 across = static_cast<f32>(windowWidth) / static_cast<f32>(g_ScreenWidthPx);
     f32 down = static_cast<f32>(windowHeight) / static_cast<f32>(g_ScreenHeightPx);
+
+    // Get UV scroll offsets from material
+    f32 scrollU = 0.0f;
+    f32 scrollV = 0.0f;
+    if (material != nullptr && material->shaderCount != 0 && material->shaders[0] != nullptr)
+    {
+        scrollU = material->shaders[0]->scroll[0];
+        scrollV = material->shaders[0]->scroll[1];
+    }
 
     for (u32 strip = 0; strip < decoded->stripCount; strip++)
     {
@@ -1757,8 +1832,8 @@ void DrawDecodedSkinSubModel(DesktopGraphics::DecodedSkinSubModel* decoded, void
             clip.y = screenPos.y;
             clip.z = screenPos.z;
             clip.w = screenPos.w;
-            clip.u = decoded->textureCoordinates[vertex].x;
-            clip.v = decoded->textureCoordinates[vertex].y;
+            clip.u = decoded->textureCoordinates[vertex].x + scrollU;
+            clip.v = decoded->textureCoordinates[vertex].y + scrollV;
             clip.colour = decoded->colours[vertex];
             if (screenPos.w < 0.0001f)
             {
@@ -1833,7 +1908,7 @@ void DrawRigidModelToScreen(RigidModel* model, const Matrix4x4* toScreen, bool w
         DesktopGraphics::Texture* texture = MaterialTexture(material);
         DesktopGraphics::DecodedSubModel* decoded = DecodedSubModelOf(decodedModel, subModel);
         SetMaterialState(material);
-        DrawDecodedSubModel(decoded, texture != nullptr ? texture->sdlTexture : nullptr, toScreen, writeDepth);
+        DrawDecodedSubModel(decoded, texture != nullptr ? texture->sdlTexture : nullptr, toScreen, writeDepth, material);
     }
 }
 
@@ -1879,7 +1954,7 @@ void DrawSkin(Skin* skin, const Matrix4x4* joints, u32 jointCount, const Matrix4
         DesktopGraphics::Texture* texture = MaterialTexture(material);
         DesktopGraphics::DecodedSkinSubModel* decoded = DecodedSkinSubModelOf(desktop, subModel);
         SetMaterialState(material);
-        DrawDecodedSkinSubModel(decoded, texture != nullptr ? texture->sdlTexture : nullptr, &toScreen, joints, jointCount);
+        DrawDecodedSkinSubModel(decoded, texture != nullptr ? texture->sdlTexture : nullptr, &toScreen, joints, jointCount, true, material, nullptr);
     }
 
     // The lighting is VU1's for now; the colours the packets carry are drawn as they are
@@ -1937,7 +2012,7 @@ void DrawBlendSkin(BlendSkin* skin, const Matrix4x4* joints, u32 jointCount, con
             blend.shapeCount = shapeCount;
             blend.shapeTotal = part->shapeCount;
 
-            DrawDecodedSkinSubModel(DecodedBlendPartOf(part), sdlTexture, &toScreen, joints, jointCount, true, &blend);
+            DrawDecodedSkinSubModel(DecodedBlendPartOf(part), sdlTexture, &toScreen, joints, jointCount, true, material, &blend);
         }
     }
 
