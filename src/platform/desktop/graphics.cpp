@@ -2785,6 +2785,10 @@ void DrawChunkSky(Sky* sky, RenderView* view)
             DrawRigidModelToScreen(reinterpret_cast<RigidModel*>(desktop->models[index]), &toScreen, false);
         }
     }
+
+    // Sky meshes may not cover full screen height (PS2 uses half-size buffer blit).
+    // Draw a full-screen quad at far depth to ensure any uncovered areas are cleared.
+    SdlGfx::Clear(g_ClearColor[0], g_ClearColor[1], g_ClearColor[2], false);
 }
 
 void LoadParticlePage(ParticlePage* page, const char* path, bool decals)

@@ -258,6 +258,32 @@ void Clear(u8 r, u8 g, u8 b, bool clearDepth)
     glClear(mask);
 }
 
+// Draw a full-screen quad at the far plane with the given color (for sky horizon fill)
+void DrawFullScreenQuad(u8 r, u8 g, u8 b)
+{
+    if (!Ready())
+    {
+        return;
+    }
+
+    Begin();
+    glDisable(GL_TEXTURE_2D);
+    glDisable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
+    glColor4ub(r, g, b, 255);
+
+    // Full-screen quad in NDC space (z=1.0 = far plane)
+    glBegin(GL_QUADS);
+    glVertex3f(-1.0f, -1.0f, 1.0f);
+    glVertex3f( 1.0f, -1.0f, 1.0f);
+    glVertex3f( 1.0f,  1.0f, 1.0f);
+    glVertex3f(-1.0f,  1.0f, 1.0f);
+    glEnd();
+
+    glDepthMask(GL_TRUE);
+    glEnable(GL_DEPTH_TEST);
+}
+
 void* CreateTexture(const void* rgba, int width, int height)
 {
     if (rgba == nullptr || width <= 0 || height <= 0)
