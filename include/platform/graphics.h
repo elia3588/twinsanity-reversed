@@ -104,6 +104,8 @@ struct FrameStart
     bool clearDepth;
 };
 void StartFrame(const FrameStart& frame);
+// Clear depth buffer to far plane - used after sky to fill gaps where sky meshes don't cover
+void ClearDepthToFar();
 // The helper programs of the vector processor the game's maths runs on (the PS2's VU0 microcode sets: the standard one, the sines
 // and cosines among them; the culling's, the particles' views' too; the decals' aging), waiting until they're loaded when asked
 // (else they're loaded while the game goes on). Nothing elsewhere

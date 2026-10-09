@@ -339,9 +339,16 @@ void CullLoadModel(const Matrix4x4* model)
 
 // 0x1C0: out of the view when wholly behind a side, the near or the far plane, partly when crossing any
 // DISABLED: CPU frustum culling doesn't match PS2 VU0 precision. Rely on GPU depth testing + clipping instead.
+// But we still need distance for sorting cells by depth.
 void CullTestBox(const Vector4* corners)
 {
     (void)corners;
+    // Compute distance from camera (g_LinkCamera) to the box's middle
+    Vector4 middle;
+    Vector4 half;
+    BoxMiddle(corners[0], corners[1], &middle, &half);
+    Vector4 apart = Difference(g_LinkCamera, middle);
+    g_Distance = FloatToInt(apart.x * apart.x + apart.y * apart.y + apart.z * apart.z);
     g_Outside = 0;
     g_Clipped = 1;  // always clipped so GPU handles it
 }

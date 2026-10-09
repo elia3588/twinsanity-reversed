@@ -1098,6 +1098,12 @@ void StartFrame(const FrameStart& frame)
     SdlGfx::Clear(g_ClearColor[0], g_ClearColor[1], g_ClearColor[2], frame.clearDepth);
 }
 
+// Clear depth buffer to far plane - used after sky to fill gaps
+void ClearDepthToFar()
+{
+    SdlGfx::ClearDepthToFar();
+}
+
 void UseHelperPrograms(u32 set, bool wait)
 {
 }
@@ -2750,10 +2756,7 @@ void ReadSky(Sky* sky, Stream* stream)
 void DrawChunkSky(Sky* sky, RenderView* view)
 {
     // A chunk with a sky doesn't set its frame up through SetUpFrame (on the PS2 the sky's own half-size buffer replaces that
-    // setup, renderer/sky.cpp): this is where the frame is cleared. Without it nothing clears between frames and each one smears
-    // over the last. Clear BOTH color and depth (sky replaces the frame setup entirely).
-    SdlGfx::Clear(g_ClearColor[0], g_ClearColor[1], g_ClearColor[2], true);
-
+    // setup, renderer/sky.cpp): the frame is already cleared at StartFrame. Sky meshes use their own material colors.
     auto* desktop = reinterpret_cast<DesktopGraphics::Sky*>(sky);
     if (desktop == nullptr || desktop->models == nullptr || view == nullptr)
     {
@@ -2785,10 +2788,6 @@ void DrawChunkSky(Sky* sky, RenderView* view)
             DrawRigidModelToScreen(reinterpret_cast<RigidModel*>(desktop->models[index]), &toScreen, false);
         }
     }
-
-    // Sky meshes may not cover full screen height (PS2 uses half-size buffer blit).
-    // Draw a full-screen quad at far depth to ensure any uncovered areas are cleared.
-    SdlGfx::Clear(g_ClearColor[0], g_ClearColor[1], g_ClearColor[2], false);
 }
 
 void LoadParticlePage(ParticlePage* page, const char* path, bool decals)

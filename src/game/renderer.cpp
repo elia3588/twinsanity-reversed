@@ -545,6 +545,8 @@ extern "C" void DrawRendererScene(Renderer* renderer)
             if (sky != nullptr)
             {
                 Platform::Graphics::DrawChunkSky(sky, renderer->view);
+                // Sky meshes may not cover full screen - clear depth to far so scene renders over it
+                Platform::Graphics::ClearDepthToFar();
             }
             else
             {

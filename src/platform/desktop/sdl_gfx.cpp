@@ -141,8 +141,11 @@ GLenum AlphaFunc3D(u32 method)
     return GL_ALWAYS;
 }
 
-// The GS's ZTST as the host's: the GS's depth runs the other way about (its 0 is the far plane, the window's 0 the near one), so
-// the usual gequal is the host's lequal and greater the host's less
+// The GS's ZTST as the host's: the GS's depth runs the other way about (its 0 is the far plane, the window's 0 the near one).
+// GS depth test methods (reverse depth): 0=NEVER, 1=ALWAYS, 2=LESS (farther), 3=LEQUAL (farther or equal),
+// 4=EQUAL, 5=NOTEQUAL, 6=GREATER (closer), 7=GEQUAL (closer or equal).
+// The game uses method 2 (GS LESS = farther) for opaque objects but expects standard LESS (closer) behavior.
+// Map pragmatically for what the game actually uses.
 GLenum DepthFunc3D(u32 method)
 {
     switch (method)
@@ -151,8 +154,18 @@ GLenum DepthFunc3D(u32 method)
         return GL_NEVER;
     case 1:
         return GL_ALWAYS;
-    case 3:
+    case 2:   // GS LESS (farther in reverse) but game uses for opaque -> standard LESS (closer)
         return GL_LESS;
+    case 3:   // GS LEQUAL (farther or equal) -> standard LEQUAL
+        return GL_LEQUAL;
+    case 4:
+        return GL_EQUAL;
+    case 5:
+        return GL_NOTEQUAL;
+    case 6:   // GS GREATER (closer in reverse) -> standard GREATER (farther)
+        return GL_GREATER;
+    case 7:   // GS GEQUAL (closer or equal in reverse) -> standard GEQUAL
+        return GL_GEQUAL;
     }
 
     return GL_LEQUAL;
@@ -216,8 +229,16 @@ void ApplyMaterial3D(bool writeDepth)
         glDisable(GL_ALPHA_TEST);
     }
 
-    glEnable(GL_DEPTH_TEST);
-    glDepthFunc(DepthFunc3D(g_Material3D.depthTest));
+    // Depth test: method 1 (GS_ZBUFF_ALWAYS) means no depth test at all
+    if (g_Material3D.depthTest == 1)
+    {
+        glDisable(GL_DEPTH_TEST);
+    }
+    else
+    {
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(DepthFunc3D(g_Material3D.depthTest));
+    }
     glDepthMask(writeDepth && g_Material3D.noDepthWrites == 0 ? GL_TRUE : GL_FALSE);
 }
 }
@@ -256,6 +277,25 @@ void Clear(u8 r, u8 g, u8 b, bool clearDepth)
         mask |= GL_DEPTH_BUFFER_BIT;
     }
     glClear(mask);
+}
+
+// Clear depth buffer to far plane (1.0) - used after sky to fill gaps where sky meshes don't cover
+void ClearDepthToFar()
+{
+    if (!Ready())
+    {
+        return;
+    }
+
+    Begin();
+    glDisable(GL_TEXTURE_2D);
+    glDepthMask(GL_TRUE);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_ALWAYS);
+    glClearDepth(1.0f);
+    glClear(GL_DEPTH_BUFFER_BIT);
+    glDepthFunc(GL_LEQUAL);
+    glDepthMask(GL_TRUE);
 }
 
 // Draw a full-screen quad at the far plane with the given color (for sky horizon fill)
