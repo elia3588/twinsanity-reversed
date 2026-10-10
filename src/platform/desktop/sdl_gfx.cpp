@@ -325,7 +325,7 @@ void DrawFullScreenQuad(u8 r, u8 g, u8 b)
 }
 
 // Draw a textured quad with 4 arbitrary vertices (for rotated sprites)
-void DrawTextureQuad(void* texture, const Vertex* verts, const Vertex* texVerts, u8 red, u8 green, u8 blue, u8 alpha)
+void DrawTextureQuad(void* texture, const Vertex* verts, const Vertex* texVerts, u8 red, u8 green, u8 blue, u8 alpha, bool repeat)
 {
     if (!Ready() || texture == nullptr)
     {
@@ -333,7 +333,7 @@ void DrawTextureQuad(void* texture, const Vertex* verts, const Vertex* texVerts,
     }
 
     Begin();
-    BindTexture(static_cast<const Texture*>(texture), false);
+    BindTexture(static_cast<const Texture*>(texture), repeat);
     glColor4ub(red, green, blue, alpha);
 
     glBegin(GL_QUADS);

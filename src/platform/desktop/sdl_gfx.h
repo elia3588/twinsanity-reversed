@@ -29,7 +29,7 @@ struct Vertex
     f32 v;
 };
 // Draw a textured quad with 4 vertices (for rotated sprites)
-void DrawTextureQuad(void* texture, const Vertex* verts, const Vertex* texVerts, u8 red, u8 green, u8 blue, u8 alpha);
+void DrawTextureQuad(void* texture, const Vertex* verts, const Vertex* texVerts, u8 red, u8 green, u8 blue, u8 alpha, bool repeat);
 // The vertexes' connected triangles (each the next three of them), coloured by the vertexes, the texture's pixels over those
 // colours when it isn't nullptr
 void DrawTriangleStrip(void* texture, const Vertex* vertices, u32 count);

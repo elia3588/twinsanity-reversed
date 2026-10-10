@@ -1401,40 +1401,56 @@ void DrawTurnedSprite(Material* material, u32 colour, const Vector2* corners, co
 
     if (tex != nullptr && tex->sdlTexture != nullptr)
     {
-        // The corners array contains 4 pre-transformed corners in this order:
-        // 0: top-left, 1: bottom-left, 2: top-right, 3: bottom-right
-        // (same order as PS2: top-left, bottom-left, top-right, bottom-right)
-        // Map to texture coordinates:
-        // 0: (texture.x, texture.y + texture.height) - top-left
-        // 1: (texture.x, texture.y) - bottom-left
-        // 2: (texture.x + texture.width, texture.y + texture.height) - top-right
-        // 3: (texture.x + texture.width, texture.y) - bottom-right
+        // The material's shader may scroll the texture: its offsets are already in normalized UV units
+        f32 scrollU = 0.0f;
+        f32 scrollV = 0.0f;
+        if (desktopMat != nullptr && desktopMat->shaderCount != 0 && desktopMat->shaders[0] != nullptr)
+        {
+            scrollU = desktopMat->shaders[0]->scroll[0];
+            scrollV = desktopMat->shaders[0]->scroll[1];
+        }
 
-        // Convert corners to screen coordinates
+        // The matrix placed the sprite's four corners as screen fractions (y down), in the texture area's own order: 0 the
+        // area's corner, 1 a height from it, 2 a width from it and 3 the opposite. The area is normalized (0..1), so left is
+        // texture.x, right texture.x + width, bottom texture.y and top texture.y + height. The host's rows run the same way
+        // the area's corner and its height do, so the corners take the area's corners in that same order (as the PS2's do).
+        // (The widget's turned square is y up and the screen's y runs down, so corners 0 and 2 land as the sprite's lower
+        // ones and 1 and 3 as its upper ones; the area's row 0 at v 0 makes this read upright.)
         f32 across = static_cast<f32>(windowWidth);
         f32 down = static_cast<f32>(windowHeight);
 
+        f32 left = texture.x + scrollU;
+        f32 right = texture.x + texture.width + scrollU;
+        f32 bottom = texture.y + scrollV;
+        f32 top = texture.y + texture.height + scrollV;
+
+        // GL_QUADS takes the quad's corners in order (top-left, top-right, bottom-right, bottom-left)
         SdlGfx::Vertex verts[4];
-        for (int i = 0; i < 4; i++)
-        {
-            verts[i].x = corners[i].x * across;
-            verts[i].y = corners[i].y * down;
-        }
-
-        // Texture coordinates in the same order
-        f32 texWidth = static_cast<f32>(tex->width);
-        f32 texHeight = static_cast<f32>(tex->height);
         SdlGfx::Vertex texVerts[4];
-        texVerts[0].u = texture.x / texWidth;
-        texVerts[0].v = (texture.y + texture.height) / texHeight;
-        texVerts[1].u = texture.x / texWidth;
-        texVerts[1].v = texture.y / texHeight;
-        texVerts[2].u = (texture.x + texture.width) / texWidth;
-        texVerts[2].v = (texture.y + texture.height) / texHeight;
-        texVerts[3].u = (texture.x + texture.width) / texWidth;
-        texVerts[3].v = texture.y / texHeight;
 
-        SdlGfx::DrawTextureQuad(tex->sdlTexture, verts, texVerts, red, green, blue, alpha);
+        verts[0].x = corners[0].x * across;
+        verts[0].y = corners[0].y * down;
+        texVerts[0].u = left;
+        texVerts[0].v = bottom;
+
+        verts[1].x = corners[2].x * across;
+        verts[1].y = corners[2].y * down;
+        texVerts[1].u = right;
+        texVerts[1].v = bottom;
+
+        verts[2].x = corners[3].x * across;
+        verts[2].y = corners[3].y * down;
+        texVerts[2].u = right;
+        texVerts[2].v = top;
+
+        verts[3].x = corners[1].x * across;
+        verts[3].y = corners[1].y * down;
+        texVerts[3].u = left;
+        texVerts[3].v = top;
+
+        // Only a scrolled material wraps its texture (the UVs go past the area); everything else samples the area as it is
+        bool scrolled = scrollU != 0.0f || scrollV != 0.0f;
+        SdlGfx::DrawTextureQuad(tex->sdlTexture, verts, texVerts, red, green, blue, alpha, scrolled);
     }
     else
     {
