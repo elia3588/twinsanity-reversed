@@ -12,4 +12,6 @@ namespace DesktopGraphics
 void ChunkViewPlanes(const Matrix4x4* matrix, Vector4* sides, Vector4* nearPlane);
 // The view's matrix to the screen, as the last LoadCullingView set it (a model's matrix is taken through it)
 const Matrix4x4* ViewToScreen();
+// The view's matrix to the clip space, as the same load set it (the shadows' camera matrix)
+const Matrix4x4* ViewToClip();
 }

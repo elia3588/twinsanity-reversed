@@ -15,6 +15,9 @@ bool HandleEvents();
 // The buttons held on the desktop's own input (keyboard and the first game controller), as the PS2 pad's button word
 // (g_TestPadButtons: its bits, pressed 1). Read after HandleEvents has polled the events
 u32 PadButtons();
+// The sticks held on the desktop's own input at the last HandleEvents, as the PS2 pad report's bytes (0x80 centred): the first
+// game controller's, or the mouse's movement over the right stick (a PC's look)
+void Sticks(u8* leftX, u8* leftY, u8* rightX, u8* rightY);
 void Show(u8 red, u8 green, u8 blue);
 void Close();
 void Present();

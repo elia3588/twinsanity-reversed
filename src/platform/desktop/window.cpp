@@ -35,11 +35,101 @@ constexpr u32 PadLeft = 0x8000;
 // How far a stick has to be pushed for a direction to count as held
 constexpr s16 StickThreshold = 0x4000;
 
+// The pad report's stick middle (0x80), how far the mouse moves in a frame for the camera to reach its own speed, and the
+// dead zone the game's axis bindings take off a stick's value (the mouse's movement is mapped past it, so a slow movement
+// still turns the camera like a PC's own look)
+constexpr u8 StickMiddle = 0x80;
+constexpr f32 MouseSensitivity = 1.0f / 20.0f;
+constexpr f32 AxisDeadZone = 0.3f;
+
 bool g_Started = false;
 SDL_Window* g_Window = nullptr;
 SDL_GLContext g_Context = nullptr;
 SDL_GameController* g_Controller = nullptr;
 u32 g_PadButtons = 0;
+
+// The mouse's movement since the last HandleEvents, and the sticks reported by the last one
+s32 g_MouseX = 0;
+s32 g_MouseY = 0;
+u8 g_LeftX = StickMiddle;
+u8 g_LeftY = StickMiddle;
+u8 g_RightX = StickMiddle;
+u8 g_RightY = StickMiddle;
+
+u8 ClampedByte(s32 value)
+{
+    if (value < 0)
+    {
+        return 0;
+    }
+    if (value > 0xFF)
+    {
+        return 0xFF;
+    }
+    return static_cast<u8>(value);
+}
+
+// A controller stick's axis (SDL's -32768..32767) as the pad report's byte (0x80 centered)
+u8 StickByte(s16 axis)
+{
+    f32 value = static_cast<f32>(axis) / 32767.0f;
+    if (value < -1.0f)
+    {
+        value = -1.0f;
+    }
+    if (value > 1.0f)
+    {
+        value = 1.0f;
+    }
+
+    return ClampedByte(128 + static_cast<s32>(value * 127.0f + (value < 0.0f ? -0.5f : 0.5f)));
+}
+
+// The mouse's movement in a frame as the right stick's byte, past the game's axis dead zone so even a slow movement counts
+u8 MouseByte(s32 delta)
+{
+    if (delta == 0)
+    {
+        return StickMiddle;
+    }
+
+    f32 value = static_cast<f32>(delta) * MouseSensitivity;
+    f32 sign = value < 0.0f ? -1.0f : 1.0f;
+    f32 magnitude = value < 0.0f ? -value : value;
+    if (magnitude > 1.0f)
+    {
+        magnitude = 1.0f;
+    }
+
+    f32 past = magnitude * (1.0f - AxisDeadZone) + AxisDeadZone;
+    return ClampedByte(128 + static_cast<s32>(sign * (past * 127.0f + 0.5f)));
+}
+
+// The sticks the desktop's own input holds: the first game controller's, and the mouse's over the right stick
+void PollSticks()
+{
+    g_LeftX = StickMiddle;
+    g_LeftY = StickMiddle;
+    g_RightX = StickMiddle;
+    g_RightY = StickMiddle;
+    if (g_Controller != nullptr)
+    {
+        g_LeftX = StickByte(SDL_GameControllerGetAxis(g_Controller, SDL_CONTROLLER_AXIS_LEFTX));
+        g_LeftY = StickByte(SDL_GameControllerGetAxis(g_Controller, SDL_CONTROLLER_AXIS_LEFTY));
+        g_RightX = StickByte(SDL_GameControllerGetAxis(g_Controller, SDL_CONTROLLER_AXIS_RIGHTX));
+        g_RightY = StickByte(SDL_GameControllerGetAxis(g_Controller, SDL_CONTROLLER_AXIS_RIGHTY));
+    }
+
+    // The mouse's movement takes the right stick over for the frame (a still mouse leaves the controller's)
+    if (g_MouseX != 0 || g_MouseY != 0)
+    {
+        g_RightX = MouseByte(g_MouseX);
+        g_RightY = MouseByte(g_MouseY);
+    }
+
+    g_MouseX = 0;
+    g_MouseY = 0;
+}
 
 // The keyboard's and the controller's buttons held, as the PS2 pad's button word
 u32 PollPad()
@@ -260,9 +350,15 @@ bool DesktopWindow::HandleEvents()
             SDL_GameControllerClose(g_Controller);
             g_Controller = nullptr;
         }
+        else if (event.type == SDL_MOUSEMOTION)
+        {
+            g_MouseX += event.motion.xrel;
+            g_MouseY += event.motion.yrel;
+        }
     }
 
     g_PadButtons = PollPad();
+    PollSticks();
     return closed;
 }
 
@@ -312,6 +408,27 @@ void Present()
 u32 PadButtons()
 {
     return g_PadButtons;
+}
+
+// The sticks the desktop's own input held at the last HandleEvents (0x80 centred)
+void Sticks(u8* leftX, u8* leftY, u8* rightX, u8* rightY)
+{
+    if (leftX != nullptr)
+    {
+        *leftX = g_LeftX;
+    }
+    if (leftY != nullptr)
+    {
+        *leftY = g_LeftY;
+    }
+    if (rightX != nullptr)
+    {
+        *rightX = g_RightX;
+    }
+    if (rightY != nullptr)
+    {
+        *rightY = g_RightY;
+    }
 }
 }
 
@@ -504,6 +621,28 @@ void Present()
 u32 PadButtons()
 {
     return 0;
+}
+
+// The sticks: none, so centred (the game reads no analog input without a window)
+void Sticks(u8* leftX, u8* leftY, u8* rightX, u8* rightY)
+{
+    constexpr u8 Middle = 0x80;
+    if (leftX != nullptr)
+    {
+        *leftX = Middle;
+    }
+    if (leftY != nullptr)
+    {
+        *leftY = Middle;
+    }
+    if (rightX != nullptr)
+    {
+        *rightX = Middle;
+    }
+    if (rightY != nullptr)
+    {
+        *rightY = Middle;
+    }
 }
 }
 #endif

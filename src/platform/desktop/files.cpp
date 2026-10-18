@@ -98,12 +98,74 @@ bool HostPath(const char* path, char* host)
 }
 }
 
+bool TryHostPathOverride(const char* path, char* host)
+{
+    const char* modFolder = std::getenv("TWINSANITY_MODS");
+    if (modFolder == nullptr || *modFolder == ' ')
+    {
+        modFolder = "mods";
+    }
+    size_t modLength = std::strlen(modFolder);
+    if (modLength >= PathSize)
+    {
+        return false;
+    }
+    std::memcpy(host, modFolder, modLength + 1);
+    const char* part = path;
+    for (const char* character = path;; character++)
+    {
+        if (*character != '\\' && *character != '/' && *character != ' ')
+        {
+            continue;
+        }
+        size_t length = static_cast<size_t>(character - part);
+        if (length != 0 && !(length == 1 && *part == '.') && !AppendEntry(host, part, length))
+        {
+            return false;
+        }
+        if (*character == ' ')
+        {
+            int fd = open(host, O_RDONLY | O_BINARY);
+            if (fd >= 0)
+            {
+                close(fd);
+                return true;
+            }
+            return false;
+        }
+        part = character + 1;
+    }
+}
+
+
 void Platform::Files::Reset()
 {
 }
 
 s32 Platform::Files::Open(const char* path, s32 flags)
 {
+    char overrideHost[PathSize];
+    if (TryHostPathOverride(path, overrideHost))
+    {
+        int mode = (flags & OpenReadWrite) == OpenReadWrite ? O_RDWR : (flags & OpenWrite) != 0 ? O_WRONLY : O_RDONLY;
+        if ((flags & OpenAppend) != 0)
+        {
+            mode |= O_APPEND;
+        }
+        if ((flags & OpenCreate) != 0)
+        {
+            mode |= O_CREAT;
+        }
+        if ((flags & OpenTruncate) != 0)
+        {
+            mode |= O_TRUNC;
+        }
+#if defined(O_BINARY)
+        mode |= O_BINARY;
+#endif
+        return open(overrideHost, mode, 0644);
+    }
+
     char host[PathSize];
     if (!HostPath(path, host))
     {
@@ -115,19 +177,16 @@ s32 Platform::Files::Open(const char* path, s32 flags)
     {
         mode |= O_APPEND;
     }
-
     if ((flags & OpenCreate) != 0)
     {
         mode |= O_CREAT;
     }
-
     if ((flags & OpenTruncate) != 0)
     {
         mode |= O_TRUNC;
     }
 
 #if defined(O_BINARY)
-    // Windows opens files as text otherwise
     mode |= O_BINARY;
 #endif
     return open(host, mode, 0644);

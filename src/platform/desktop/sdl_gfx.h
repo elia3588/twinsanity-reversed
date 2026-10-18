@@ -34,7 +34,10 @@ void DrawTextureQuad(void* texture, const Vertex* verts, const Vertex* texVerts,
 // colours when it isn't nullptr
 void DrawTriangleStrip(void* texture, const Vertex* vertices, u32 count);
 // One vertex of the 3D scene: where it is in the window's pixels and its depth (0 nearest, 1 farthest, tested against what's
-// already drawn), with the same colour and texture coordinates as Vertex
+// already drawn), with the same colour and texture coordinates as Vertex. w is the clip-space w the place was divided by (the
+// game's own perspective divide): the drawer scales the place and its depth back up by it and lets the host divide again, so the
+// host's rasteriser interpolates the texture coordinates and colours in perspective rather than flat across the screen (without
+// it a large face's texture swims as the camera moves, the PS1 look rather than the PS2's)
 struct Vertex3D
 {
     f32 x;
@@ -46,6 +49,7 @@ struct Vertex3D
     u8 alpha;
     f32 u;
     f32 v;
+    f32 w;
 };
 // A 3D draw's material: the shader's own GS setting bytes (its blending and alpha preset, or its own alpha formula, its alpha
 // test and its depth test). The game's 3D drawers set it from each submodel's material before its strips are drawn; every
@@ -77,6 +81,14 @@ void SetMaterial3D(const Material3D& material);
 // lists widened into strips, mark the connecting vertexes so)
 void DrawTriangleStrip3D(void* texture, const Vertex3D* vertices, u32 count, bool writeDepth = true,
                          const u8* noDraw = nullptr);
+// The shadows' strips are drawn with their own colour whatever the vertexes carry (the shapes' packets hold their own for the
+// scene's drawing, which the shadow pass has no use for): set here, the four channels, or none to draw the vertexes' own again
+void SetStripColour(const u8* colour);
+// A small camera-ward depth bias for a decal drawn on a surface (the shadows): lets a shape lying on the floor pass the depth
+// test against it instead of z-fighting
+void SetDepthBias(bool enabled);
+// Get the current 3D material state (for save/restore around shadow passes)
+Material3D GetMaterial3D();
 // The texture drawn in the window: the destination's and the source's rectangles in pixels, and the tint its pixels are
 // modulated by
 void DrawTexture(void* texture, s32 dstX, s32 dstY, s32 dstWidth, s32 dstHeight, s32 srcX, s32 srcY, s32 srcWidth, s32 srcHeight,

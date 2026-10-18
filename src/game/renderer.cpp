@@ -538,15 +538,12 @@ extern "C" void DrawRendererScene(Renderer* renderer)
             ClearLightingUnused();
             s32 fov = lens->fov;
             f32 aspect = g_WidescreenTv != 0 ? WideAspect : NarrowAspect;
-            f32 correctedAspect = aspect * lens->pixelAspect;
-            Platform::Graphics::SetViewFrustum(lens->nearPlane, lens->farPlane, correctedAspect, &fov);
+            Platform::Graphics::SetViewFrustum(lens->nearPlane, lens->farPlane, aspect, &fov);
             renderer->view->MakeMatrices(renderer->target);
             chunk->drawMatrix = identity;
             if (sky != nullptr)
             {
                 Platform::Graphics::DrawChunkSky(sky, renderer->view);
-                // Sky meshes may not cover full screen - clear depth to far so scene renders over it
-                Platform::Graphics::ClearDepthToFar();
             }
             else
             {

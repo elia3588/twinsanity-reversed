@@ -1,8 +1,11 @@
 #include "platform/graphics.h"
 
 #include "frustum.h"
+#include "game/camerarig.h"
+#include "game/instances.h"
 #include "game/math.h"
 #include "game/scenery.h"
+#include "game/view.h"
 
 // The desktop's culling: the view's frustum and the chunks' boxes tested against it (VU0's culling set on the PS2)
 // On the PS2 the frustum's planes go into VU0's memory (renderer/culling.cpp), and its microprograms 0x1C0 (a box), 0x2D0 (a
@@ -267,6 +270,11 @@ const Matrix4x4* ViewToScreen()
 {
     return &g_ToScreen;
 }
+
+const Matrix4x4* ViewToClip()
+{
+    return &g_ToClip;
+}
 }
 
 namespace Platform::Graphics
@@ -277,6 +285,18 @@ void SetViewFrustum(f32 near, f32 far, f32 aspect, const s32* fieldOfView)
     // Use standard near plane (0.05f like TT-Lab) and correct aspect ratio.
     // The game passes near=0.1f, but we use 0.05f for more conservative culling.
     constexpr f32 CullNear = 0.05f;
+    // The view's projection is the screen's aspect times the lens's pixels' aspect (RenderView::Update), and the game hands only
+    // the screen's aspect: the plans have to be made for the same one, or a 4:3-corrected lens' boxes get culled off screen
+    InstanceContext* camera = CameraInstance();
+    if (camera != nullptr)
+    {
+        auto* lens = static_cast<CameraLensNode*>(GetGameNode(&camera->nodes, NodeCameraLens));
+        if (lens != nullptr)
+        {
+            aspect = aspect * lens->pixelAspect;
+        }
+    }
+
     LensFrustum(CullNear, far, aspect, 1.0f, *fieldOfView, g_ViewPlanes);
     LensFrustum(CullNear, far, aspect, FarSidesScale, *fieldOfView, g_FarViewPlanes);
 }

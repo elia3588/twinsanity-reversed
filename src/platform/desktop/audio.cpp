@@ -92,56 +92,84 @@ s32 PlaySound(u32 sound, u32 voiceAndGroup, s16 left, s16 right, u16 pitch, u32 
 
 s32 PitchOfRate(s32 rate)
 {
-    return 0;
+    // The pitch for a sample's own rate: the PS2's SPU2 plays 0x1000 as the sample's rate, so return that (the game scales
+    // it by its own g_PitchScale)
+    (void)rate;
+    return 0x1000;
 }
 
 u32 ChannelBufferAddress(s32 channel)
 {
+    (void)channel;
     return 0;
 }
 
 void ReadMusic(s32 file, u32 offset, u32 size)
 {
+    (void)file;
+    (void)offset;
+    (void)size;
 }
 
 s32 StreamMusic(s32 file, s32 channel, u32 voiceAndGroup, u16 pitch, bool once)
 {
-    return 0;
+    // The music "streams" instantly: the channel is ready and playing (silently)
+    (void)file;
+    (void)channel;
+    (void)voiceAndGroup;
+    (void)pitch;
+    (void)once;
+    return channel;
 }
 
 void InterleaveMusic(s32 channel, u32 blockSize)
 {
+    (void)channel;
+    (void)blockSize;
 }
 
 void AddMusicChannel(s32 child, s32 parent, u32 voiceAndGroup, u32 soundAddress)
 {
+    (void)child;
+    (void)parent;
+    (void)voiceAndGroup;
+    (void)soundAddress;
 }
 
 void SetMusicEnd(s32 channel, u32 end)
 {
+    (void)channel;
+    (void)end;
 }
 
 void PrepareMusic(s32 channel)
 {
+    (void)channel;
 }
 
 bool IsMusicReady(s32 channel)
 {
-    return false;
+    // The music is ready at once (no decoding/streaming delay on the stub)
+    (void)channel;
+    return true;
 }
 
 s32 PlayMusic(s32 channel)
 {
-    return 0;
+    return channel;
 }
 
 bool IsMusicPlaying(s32 channel)
 {
-    return false;
+    // The music keeps "playing" (silently) so the game never thinks it has ended on its own (a real decoder would report its
+    // end; the stub stays playing until StopMusic is called)
+    (void)channel;
+    return true;
 }
 
 void StopMusic(s32 channel)
 {
+    (void)channel;
 }
 
 }

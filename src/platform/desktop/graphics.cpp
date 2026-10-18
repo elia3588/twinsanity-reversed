@@ -7,9 +7,12 @@
 #include "gs_texture.h"
 #include "sdl_gfx.h"
 
+#include "game/collision.h"
 #include "game/context.h"
 #include "game/controllers.h"
 #include "game/font.h"
+#include "game/instances.h"
+#include "game/layout.h"
 #include "game/particles.h"
 #include "game/place.h"
 #include "game/renderer.h"
@@ -19,6 +22,7 @@
 #include "game/memory.h"
 #include "game/scenery.h"
 #include "game/shaderanimation.h"
+#include "game/shadows.h"
 #include "game/stream.h"
 
 #include <algorithm>
@@ -1610,6 +1614,9 @@ void ClipToScreen(const ClipVertex& clip, f32 across, f32 down, SdlGfx::Vertex3D
     // The game texture's row 0 (v 0) is the decoded image's row 0, which the SDL texture keeps as its own row 0 (its t 0): the
     // model's v samples the row the game means as it is (the 2D drawers' "turned" path serves a top-down source area, not this)
     out->v = clip.v;
+    // The clip-space w the place was divided by: the drawer scales the place back up by it so the host divides again and
+    // interpolates in perspective (see Vertex3D)
+    out->w = clip.w;
 }
 }
 
@@ -2037,20 +2044,142 @@ void DrawBlendSkin(BlendSkin* skin, const Matrix4x4* joints, u32 jointCount, con
     (void)mode;
 }
 
+// The shadows' own material: untextured, its shapes' coverage taken out of the frame, its depth tested and written so a shape's
+// own near faces hide its far ones (the PS2 gets the same from its depth buffer). The PS2 accumulates the shapes into a half-size
+// buffer and blends that back a quarter at a time; the desktop draws each shape straight to the screen with the frame less its
+// coverage (the same subtractive darkening, without the buffer's softening)
+namespace
+{
+DesktopGraphics::Material g_ShadowMaterial;
+DesktopGraphics::Shader g_ShadowShader;
+bool g_ShadowMaterialMade = false;
+
+// How far above a shape's joint the ground is looked for, how far below it the search goes, and how little the shape is lifted off
+// what it finds (so the same surface's own draws don't fight it)
+constexpr f32 ShadowProbeRise = 1.0f;
+constexpr f32 ShadowProbeDepth = 100.0f;
+constexpr f32 ShadowLift = 0.05f;
+
+void MakeShadowMaterial()
+{
+    if (g_ShadowMaterialMade)
+    {
+        return;
+    }
+
+    g_ShadowMaterialMade = true;
+    ConstructDesktopMaterial(&g_ShadowMaterial);
+    std::memset(&g_ShadowShader, 0, sizeof(g_ShadowShader));
+    for (u32 channel = 0; channel < 4; channel++)
+    {
+        g_ShadowShader.shaderColour[channel] = 1.0f;
+    }
+
+    g_ShadowShader.settings[0] = 1;    // the frame is blended with
+    g_ShadowShader.settings[1] = 2;    // the source taken away from it
+    g_ShadowShader.settings[8] = 3;    // depth test lequal (matches GS GEQUAL with desktop depth convention)
+    g_ShadowShader.settings[17] = 0;   // the preset's alpha rather than the shader's own
+    g_ShadowShader.settings[27] = 1;   // the depth is NOT written (don't occlude UI)
+    g_ShadowMaterial.shaderCount = 1;
+    g_ShadowMaterial.shaders[0] = &g_ShadowShader;
+}
+}
+
+// The shadows' screen and camera matrices: the game's shadow code multiplies each cast shape's world matrix by them (on the PS2
+// the screen one carried the half-size buffer's projection; here it is the view's full-screen projection). They are the game's own
+// retail globals (game/shadows.h), so the game's ChunkShadows::Draw reads what BeginShadows writes.
+SdlGfx::Material3D g_SavedMaterial3D;
+
 void SetUpShadowPass()
 {
+    // The PS2 uploaded its palette and set the half-size pass up here; the desktop draws the shapes straight to the screen, so
+    // the only set-up is the material the drawing takes (made on the first draw)
+    MakeShadowMaterial();
 }
 
 void BeginShadows()
 {
+    g_ShadowToCamera = *DesktopGraphics::ViewToClip();
+    g_ShadowToScreen = *DesktopGraphics::ViewToScreen();
+    // Save current material state to restore after shadows
+    g_SavedMaterial3D = SdlGfx::GetMaterial3D();
 }
 
 void EndShadows()
 {
+    // Restore material state so subsequent rendering (UI, etc.) isn't affected by shadow settings
+    SdlGfx::SetMaterial3D(g_SavedMaterial3D);
 }
 
 void DrawShadowMesh(RigidModel* mesh, const Matrix4x4* toScreen, const Matrix4x4* toCamera, const Matrix4x4* world)
 {
+    auto* desktop = reinterpret_cast<DesktopGraphics::RigidModel*>(mesh);
+    if (desktop == nullptr || desktop->model == nullptr || toScreen == nullptr)
+    {
+        return;
+    }
+
+    MakeShadowMaterial();
+    SetMaterialState(&g_ShadowMaterial);
+    // White source, its alpha the quarter the PS2 takes away (the preset subtracts source·alpha from the frame)
+    const u8 shadowColour[4] = {255, 255, 255, 64};
+    SdlGfx::SetStripColour(shadowColour);
+
+    DesktopGraphics::Model* decodedModel = desktop->model;
+    u32 count = desktop->count;
+    if (decodedModel->subModelCount < count)
+    {
+        count = decodedModel->subModelCount;
+    }
+
+    // The shape lies flat on the floor its joint stands over. The game makes each cast shape a volume hanging from its joint, a
+    // whole cast strength tall (and the strength follows the instance's distance from the eye, so the volume's bottom - and so the
+    // shapes - drifted with the camera and met the floor at different heights). The desktop draws the shape itself: its height
+    // column is dropped (row 1 of the mesh's matrix, the shape's own up) and what is left is laid on the ground the collision
+    // under the joint gives
+    Matrix4x4 screen = *toScreen;
+    *RowOf(&screen, 1) = Vector4{0.0f, 0.0f, 0.0f, 0.0f};
+
+    if (world != nullptr)
+    {
+        const Vector4* at = RowOf(world, 3);
+        // The light casts straight down (the lighting constants' shadow direction is down), so the floor under the shape is
+        // straight below its joint, in the chunk the view looks through
+        InstanceContext* viewCamera = CameraInstance();
+        ChunkData* chunk = viewCamera != nullptr ? viewCamera->chunk : nullptr;
+        Vector4 from = *at;
+        Vector4 to = from;
+        from.y = from.y + ShadowProbeRise;
+        from.w = 1.0f;
+        to.y = from.y - ShadowProbeDepth;
+        Vector4 hit;
+        if (chunk != nullptr &&
+            GetCollisionCheck(chunk, &from, &to, SurfaceFlags::SolidToPlayerProbes, nullptr, &hit, nullptr) != 0)
+        {
+            // The floor found, from the joint's own place (the mesh's matrix carries the world it draws in): the shape's world
+            // y is moved by it, which is a step along the world y axis' image on the screen
+            f32 drop = (hit.y + ShadowLift) - at->y;
+            const Vector4* down = RowOf(&g_ShadowToScreen, 1);
+            Vector4* screenAt = RowOf(&screen, 3);
+            screenAt->x = screenAt->x + drop * down->x;
+            screenAt->y = screenAt->y + drop * down->y;
+            screenAt->z = screenAt->z + drop * down->z;
+            screenAt->w = screenAt->w + drop * down->w;
+        }
+    }
+
+    // The shape lies on the floor, so a small depth bias lets it pass the depth test against it
+    SdlGfx::SetDepthBias(true);
+    for (u32 subModel = 0; subModel < count; subModel++)
+    {
+        DesktopGraphics::DecodedSubModel* decoded = DecodedSubModelOf(decodedModel, subModel);
+
+        DrawDecodedSubModel(decoded, nullptr, &screen, true, nullptr);
+    }
+    SdlGfx::SetDepthBias(false);
+
+    SdlGfx::SetStripColour(nullptr);
+    (void)toCamera;
 }
 
 void BeginScreenModel()
@@ -2886,36 +3015,39 @@ void DrawChunkSky(Sky* sky, RenderView* view)
     // A chunk with a sky doesn't set its frame up through SetUpFrame (on the PS2 the sky's own half-size buffer replaces that
     // setup, renderer/sky.cpp): the frame is already cleared at StartFrame. Sky meshes use their own material colors.
     auto* desktop = reinterpret_cast<DesktopGraphics::Sky*>(sky);
-    if (desktop == nullptr || desktop->models == nullptr || view == nullptr)
+    if (desktop != nullptr && desktop->models != nullptr && view != nullptr)
     {
-        return;
-    }
-
-    // The sky turns with the camera but doesn't move with it: its meshes are drawn as though the camera sat at the world's origin,
-    // so the camera's place goes in front of the view's own matrix to the screen (the PS2's DrawSky composes it the same way)
-    Matrix4x4 translation;
-    InitIdentityMatrix(&translation);
-    Reference* reference = view->cameraObject;
-    ObjectPlace* place = reference != nullptr && reference->object != nullptr ? reference->object->place : nullptr;
-    if (place != nullptr)
-    {
-        translation.m[3][0] = place->matrix.m[3][0];
-        translation.m[3][1] = place->matrix.m[3][1];
-        translation.m[3][2] = place->matrix.m[3][2];
-        translation.m[3][3] = place->matrix.m[3][3];
-    }
-
-    Matrix4x4 toScreen;
-    VuMultiplyMatrices(&translation, &view->toScreen, &toScreen);
-
-    for (u32 index = 0; index < desktop->count; index++)
-    {
-        if (desktop->models[index] != nullptr)
+        // The sky turns with the camera but doesn't move with it: its meshes are drawn as though the camera sat at the world's origin,
+        // so the camera's place goes in front of the view's own matrix to the screen (the PS2's DrawSky composes it the same way)
+        Matrix4x4 translation;
+        InitIdentityMatrix(&translation);
+        Reference* reference = view->cameraObject;
+        ObjectPlace* place = reference != nullptr && reference->object != nullptr ? reference->object->place : nullptr;
+        if (place != nullptr)
         {
-            // The background never writes depth: the scene drawn after it comes over the top
-            DrawRigidModelToScreen(reinterpret_cast<RigidModel*>(desktop->models[index]), &toScreen, false);
+            translation.m[3][0] = place->matrix.m[3][0];
+            translation.m[3][1] = place->matrix.m[3][1];
+            translation.m[3][2] = place->matrix.m[3][2];
+            translation.m[3][3] = place->matrix.m[3][3];
+        }
+
+        Matrix4x4 toScreen;
+        VuMultiplyMatrices(&translation, &view->toScreen, &toScreen);
+
+        for (u32 index = 0; index < desktop->count; index++)
+        {
+            if (desktop->models[index] != nullptr)
+            {
+                // The background never writes depth: the scene drawn after it comes over the top
+                DrawRigidModelToScreen(reinterpret_cast<RigidModel*>(desktop->models[index]), &toScreen, false);
+            }
         }
     }
+
+    // The sky's meshes don't cover the whole screen (and write no depth), so the scene drawn after would meet the depth the frame
+    // was cleared to: the depth is cleared to the far plane here (the game's renderer asks for the same clear right after a sky
+    // is drawn; kept here so the game's own files need no desktop-side call)
+    SdlGfx::ClearDepthToFar();
 }
 
 void LoadParticlePage(ParticlePage* page, const char* path, bool decals)

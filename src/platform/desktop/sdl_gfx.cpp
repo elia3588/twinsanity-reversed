@@ -5,6 +5,9 @@
 #include <SDL.h>
 #include <SDL_opengl.h>
 #include <cstdlib>
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 
 // Clamp to edge isn't in GL 1.1's header (the SDL one usually has it)
 #ifndef GL_CLAMP_TO_EDGE
@@ -36,6 +39,9 @@ bool Ready()
 }
 
 // The window's pixels laid over the drawing (its corner the top left), textures blended and the depth test off while the 2D is
+// Forward declaration for blend equation function (defined later)
+void SetBlendEquation(GLenum equation);
+
 void Begin()
 {
     glViewport(0, 0, g_Width, g_Height);
@@ -53,6 +59,7 @@ void Begin()
     // again after Begin)
     glDisable(GL_ALPHA_TEST);
     glEnable(GL_BLEND);
+    SetBlendEquation(GL_FUNC_ADD);  // Reset blend equation (shadow pass may have changed it)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 }
 
@@ -114,6 +121,8 @@ void BindTexture(const Texture* texture, bool repeat = false)
 
 // The material the 3D drawers last set (SetMaterial3D), the plain state until one does
 Material3D g_Material3D = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0};
+// The strip's flat colour (SetStripColour): the vertexes' own until one is set
+const u8* g_StripColour = nullptr;
 
 // The GS's ATST as the host's alpha function
 GLenum AlphaFunc3D(u32 method)
@@ -173,8 +182,39 @@ GLenum DepthFunc3D(u32 method)
 
 // The blend the material's preset asks for: the GS ALPHA formulas InitAlphaPresets writes, as the host's source and destination
 // factors (its own formula is rare and falls back to the mix)
+// The subtract preset needs a blend equation, which is GL 1.4 and so isn't among the functions opengl32.dll exports (its
+// header still declares it): the entry point is taken from the context when it's first needed
+void SetBlendEquation(GLenum equation)
+{
+    typedef void(APIENTRY* BlendEquationProc)(GLenum);
+    static BlendEquationProc function = nullptr;
+    static bool looked = false;
+    if (!looked)
+    {
+        looked = true;
+        function = reinterpret_cast<BlendEquationProc>(SDL_GL_GetProcAddress("glBlendEquation"));
+        if (function == nullptr)
+        {
+            function = reinterpret_cast<BlendEquationProc>(SDL_GL_GetProcAddress("glBlendEquationEXT"));
+        }
+#if defined(_WIN32)
+        // On Windows, glBlendEquation is exported from opengl32.dll
+        if (function == nullptr)
+        {
+            function = reinterpret_cast<BlendEquationProc>(GetProcAddress(GetModuleHandleA("opengl32.dll"), "glBlendEquation"));
+        }
+#endif
+    }
+
+    if (function != nullptr)
+    {
+        function(equation);
+    }
+}
+
 void ApplyBlend3D()
 {
+    SetBlendEquation(GL_FUNC_ADD);
     if (g_Material3D.ownAlpha != 0)
     {
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -185,6 +225,10 @@ void ApplyBlend3D()
     {
     case 1:   // add: source·sourceAlpha + destination
     case 3:   // brighten (as close as the host's factors reach)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+        return;
+    case 2:   // subtract: destination - source·sourceAlpha
+        SetBlendEquation(GL_FUNC_REVERSE_SUBTRACT);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE);
         return;
     case 4:   // darken: destination·(1 - sourceAlpha)
@@ -432,6 +476,31 @@ void SetMaterial3D(const Material3D& material)
     g_Material3D = material;
 }
 
+Material3D GetMaterial3D()
+{
+    return g_Material3D;
+}
+
+void SetStripColour(const u8* colour)
+{
+    g_StripColour = colour;
+}
+
+// A small camera-ward depth bias for decals drawn on a surface (the shadows): the polygon offset lets a shape lying exactly on
+// the floor pass the depth test against it instead of z-fighting
+void SetDepthBias(bool enabled)
+{
+    if (enabled)
+    {
+        glEnable(GL_POLYGON_OFFSET_FILL);
+        glPolygonOffset(-1.0f, -4.0f);
+    }
+    else
+    {
+        glDisable(GL_POLYGON_OFFSET_FILL);
+    }
+}
+
 void DrawTriangleStrip3D(void* handle, const Vertex3D* vertices, u32 count, bool writeDepth, const u8* noDraw)
 {
     if (!Ready() || vertices == nullptr || count < 3)
@@ -459,9 +528,25 @@ void DrawTriangleStrip3D(void* handle, const Vertex3D* vertices, u32 count, bool
             for (u32 corner = 0; corner < 3; corner++)
             {
                 const Vertex3D& vertex = vertices[index - 2 + corner];
-                glColor4ub(vertex.red, vertex.green, vertex.blue, vertex.alpha);
+                if (g_StripColour != nullptr)
+                {
+                    glColor4ub(g_StripColour[0], g_StripColour[1], g_StripColour[2], g_StripColour[3]);
+                }
+                else
+                {
+                    glColor4ub(vertex.red, vertex.green, vertex.blue, vertex.alpha);
+                }
                 glTexCoord2f(vertex.u, vertex.v);
-                glVertex3f(vertex.x, vertex.y, vertex.z);
+                // The place is scaled back up by its clip w so the host's own divide and perspective-correct interpolation
+                // reproduce it (the ortho projection carries w straight through)
+                if (vertex.w > 0.0f)
+                {
+                    glVertex4f(vertex.x * vertex.w, vertex.y * vertex.w, vertex.z * vertex.w, vertex.w);
+                }
+                else
+                {
+                    glVertex3f(vertex.x, vertex.y, vertex.z);
+                }
             }
         }
         glEnd();
@@ -499,9 +584,23 @@ void DrawTriangleStrip3D(void* handle, const Vertex3D* vertices, u32 count, bool
 
             if (!degenerate)
             {
-                glColor4ub(v.red, v.green, v.blue, v.alpha);
+                if (g_StripColour != nullptr)
+                {
+                    glColor4ub(g_StripColour[0], g_StripColour[1], g_StripColour[2], g_StripColour[3]);
+                }
+                else
+                {
+                    glColor4ub(v.red, v.green, v.blue, v.alpha);
+                }
                 glTexCoord2f(v.u, v.v);
-                glVertex3f(v.x, v.y, v.z);
+                if (v.w > 0.0f)
+                {
+                    glVertex4f(v.x * v.w, v.y * v.w, v.z * v.w, v.w);
+                }
+                else
+                {
+                    glVertex3f(v.x, v.y, v.z);
+                }
                 prev2X = prevX; prev2Y = prevY; prev2Z = prevZ;
                 prevX = v.x; prevY = v.y; prevZ = v.z;
                 emitted++;
@@ -558,5 +657,8 @@ void DrawTriangleStrip(void*, const Vertex*, u32) {}
 void DrawTriangleStrip3D(void*, const Vertex3D*, u32, bool, const u8*) {}
 void DrawTexture(void*, int, int, int, int, int, int, int, int, u8, u8, u8, u8) {}
 void DrawTextureFlipped(void*, int, int, int, int, int, int, int, int, u8, u8, u8, u8) {}
+void SetStripColour(const u8*) {}
+void SetDepthBias(bool) {}
+Material3D GetMaterial3D() { Material3D m = {0,0,0,0,0,0,0,0,0,0,0,0,2,0}; return m; }
 }
 #endif

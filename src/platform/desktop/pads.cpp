@@ -48,6 +48,8 @@ void FillReport(u8* data, u32 held)
     data[StickRightY] = StickMiddle;
     data[StickLeftX] = StickMiddle;
     data[StickLeftY] = StickMiddle;
+    // The desktop's own sticks over the centred ones (the controller's, or the mouse's movement over the right stick)
+    DesktopWindow::Sticks(&data[StickLeftX], &data[StickLeftY], &data[StickRightX], &data[StickRightY]);
 }
 }
 
