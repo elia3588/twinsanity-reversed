@@ -87,6 +87,12 @@ void SetStripColour(const u8* colour);
 // A small camera-ward depth bias for a decal drawn on a surface (the shadows): lets a shape lying on the floor pass the depth
 // test against it instead of z-fighting
 void SetDepthBias(bool enabled);
+// The shadows' shapes drawn one after another, overlapping where they meet: the PS2 accumulates them into a half-size buffer
+// whose destination alpha gives a pixel one shape's coverage, so shapes over each other darken it once and merge where they meet.
+// The desktop gets the same from the stencil buffer: each pixel takes the first shape covering it and the ones after it are left
+// out. BeginShadowMask clears the mask and turns the test on, EndShadowMask turns it off again
+void BeginShadowMask();
+void EndShadowMask();
 // Get the current 3D material state (for save/restore around shadow passes)
 Material3D GetMaterial3D();
 // The texture drawn in the window: the destination's and the source's rectangles in pixels, and the tint its pixels are

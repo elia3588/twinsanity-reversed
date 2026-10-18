@@ -501,6 +501,34 @@ void SetDepthBias(bool enabled)
     }
 }
 
+// The shadows' shapes drawn one after another, overlapping where they meet: the PS2 accumulates them into a half-size buffer
+// whose destination alpha gives a pixel one shape's coverage, so shapes over each other darken it once and merge where they meet.
+// The desktop gets the same from the stencil buffer: each pixel takes the first shape covering it and the ones after it are left
+// out (the depth test still decides which of them is drawn there, against the scene)
+void BeginShadowMask()
+{
+    if (!Ready())
+    {
+        return;
+    }
+
+    glDisable(GL_SCISSOR_TEST);
+    glStencilMask(0xFF);
+    glClearStencil(0);
+    glClear(GL_STENCIL_BUFFER_BIT);
+    glEnable(GL_STENCIL_TEST);
+    // Only where no shape has been drawn yet, and a pixel one covers taken out of the ones after it (the increment, not a
+    // replace, which would write the test's reference value, 0, back and let every shape through)
+    glStencilFunc(GL_EQUAL, 0, 0xFF);
+    glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
+}
+
+void EndShadowMask()
+{
+    glDisable(GL_STENCIL_TEST);
+    glStencilMask(0xFF);
+}
+
 void DrawTriangleStrip3D(void* handle, const Vertex3D* vertices, u32 count, bool writeDepth, const u8* noDraw)
 {
     if (!Ready() || vertices == nullptr || count < 3)

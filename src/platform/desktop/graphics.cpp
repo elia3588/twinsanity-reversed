@@ -1002,13 +1002,43 @@ void MoveDisplay(const Vector2* offset)
 {
 }
 
-// The materials' animations stepped by the game's clock (its materials' shaders and the particles' waves)
+namespace
+{
+// A scroll's phase gone round 0 to 1 (the PS2's shadertypes.cpp Wrapped): the whole turns of the phase are dropped and what is
+// left is the scroll
+f32 WrappedScroll(f32* phase, f32 speed, f32 seconds)
+{
+    f32 value = *phase + speed * seconds;
+    *phase = value;
+    s32 whole = TruncateToInt(value);
+    if (value < static_cast<f32>(whole))
+    {
+        whole--;
+    }
+
+    *phase -= static_cast<f32>(whole);
+    return *phase;
+}
+
+// The sine or the cosine of the phase's turn (the PS2's Waved; retail truncates the phase as well and drops it)
+f32 WavedScroll(f32* phase, f32 speed, f32 seconds, bool cosine)
+{
+    *phase += speed * seconds;
+    s32 angle;
+    AngleFrom(&angle, *phase * TwoPi, AngleRadians);
+    return cosine ? CosOfAngle(&angle) : SinOfAngle(&angle);
+}
+}
+
+// The materials' animations stepped by the game's clock: the PS2's AnimateMaterials and the shaders' UpdateShader
+// (renderer/shadertypes.cpp), whose seconds are the clock's last advance. Every shader is stepped, not only the animated ones:
+// the wrapped and the waved scrolls (water, fountains and the like) are the shader's own phases and speeds, with no animation
+// behind them at all
 void StepAnimations(const TimeClock* clock)
 {
-    (void)clock;
-    // Frame time in seconds (60 FPS fixed)
-    constexpr f32 seconds = 1.0f / 60.0f;
-    if (seconds <= 0.0f)
+    // The frame's seconds: what the clock advanced by, or a frame's own when there is no clock to ask
+    f32 seconds = clock != nullptr ? static_cast<f32>(static_cast<s32>(clock->advance)) * g_SecondsPerClockUnit : SecondsPerFrame;
+    if (!(0.0f < seconds))
     {
         return;
     }
@@ -1017,27 +1047,68 @@ void StepAnimations(const TimeClock* clock)
     for (u32 i = 0; i < g_MaterialTable.count; i++)
     {
         DesktopGraphics::MaterialResource* resource = reinterpret_cast<DesktopGraphics::MaterialResource*>(g_MaterialTable.entries[i].item);
-        if (resource != nullptr && resource->material != nullptr)
+        if (resource == nullptr || resource->material == nullptr)
         {
-            DesktopGraphics::Material* material = resource->material;
-            for (u32 j = 0; j < material->shaderCount; j++)
-            {
-                DesktopGraphics::Shader* shader = material->shaders[j];
-                if (shader != nullptr && shader->animation != nullptr)
-                {
-                    // Advance the shader animation by the frame time
-                    AdvanceShaderAnimation(shader->animation, 1.0f / 60.0f);
+            continue;
+        }
 
-                    // Update UV scroll offsets from animation (settings[15]=uScroll, settings[16]=vScroll)
-                    if (shader->settings[15] == 1)  // uScroll == ScrollAnimated
-                    {
-                        shader->scroll[0] = shader->animation->uvOffset.x;
-                    }
-                    if (shader->settings[16] == 1)  // vScroll == ScrollAnimated
-                    {
-                        shader->scroll[1] = shader->animation->uvOffset.y;
-                    }
-                }
+        DesktopGraphics::Material* material = resource->material;
+        for (u32 j = 0; j < material->shaderCount; j++)
+        {
+            DesktopGraphics::Shader* shader = material->shaders[j];
+            if (shader == nullptr)
+            {
+                continue;
+            }
+
+            // The scrolls by their modes (U's cosine lands in V's place, as retail has it): 1 the animation's own offset, 2 the
+            // phase going round, 3 its sine and 4 its cosine
+            switch (shader->settings[15])
+            {
+            case 2:
+                shader->scroll[0] = WrappedScroll(&shader->scrollPhases[0], shader->scrollSpeeds[0], seconds);
+                break;
+            case 3:
+                shader->scroll[0] = WavedScroll(&shader->scrollPhases[0], shader->scrollSpeeds[0], seconds, false);
+                break;
+            case 4:
+                shader->scroll[1] = WavedScroll(&shader->scrollPhases[0], shader->scrollSpeeds[0], seconds, true);
+                break;
+            default:
+                break;
+            }
+
+            switch (shader->settings[16])
+            {
+            case 2:
+                shader->scroll[1] = WrappedScroll(&shader->scrollPhases[1], shader->scrollSpeeds[1], seconds);
+                break;
+            case 3:
+                shader->scroll[1] = WavedScroll(&shader->scrollPhases[1], shader->scrollSpeeds[1], seconds, false);
+                break;
+            case 4:
+                shader->scroll[1] = WavedScroll(&shader->scrollPhases[1], shader->scrollSpeeds[1], seconds, true);
+                break;
+            default:
+                break;
+            }
+
+            ShaderAnimation* animation = shader->animation;
+            if (animation == nullptr)
+            {
+                continue;
+            }
+
+            // The animation moved on: the animated scrolls take its offset (the colour it carries the drawing doesn't use yet)
+            AdvanceShaderAnimation(animation, seconds);
+            if (shader->settings[15] == 1)  // uScroll == ScrollAnimated
+            {
+                shader->scroll[0] = animation->uvOffset.x;
+            }
+
+            if (shader->settings[16] == 1)  // vScroll == ScrollAnimated
+            {
+                shader->scroll[1] = animation->uvOffset.y;
             }
         }
     }
@@ -2046,18 +2117,22 @@ void DrawBlendSkin(BlendSkin* skin, const Matrix4x4* joints, u32 jointCount, con
 
 // The shadows' own material: untextured, its shapes' coverage taken out of the frame, its depth tested and written so a shape's
 // own near faces hide its far ones (the PS2 gets the same from its depth buffer). The PS2 accumulates the shapes into a half-size
-// buffer and blends that back a quarter at a time; the desktop draws each shape straight to the screen with the frame less its
-// coverage (the same subtractive darkening, without the buffer's softening)
+// buffer (a pixel taking one shape's coverage between them) and blends that back a quarter at a time; the desktop draws each shape
+// straight to the screen with the frame less its coverage (the same subtractive darkening, without the buffer's softening) and
+// takes a pixel's coverage once between them from the stencil mask (SdlGfx::BeginShadowMask), so shapes over each other darken it
+// once and merge where they meet instead of stacking
 namespace
 {
 DesktopGraphics::Material g_ShadowMaterial;
 DesktopGraphics::Shader g_ShadowShader;
 bool g_ShadowMaterialMade = false;
 
-// How far above a shape's joint the ground is looked for, how far below it the search goes, and how little the shape is lifted off
+// How far above a shape's joint the ground is looked for, how far below it the search goes, how far below the joint the second
+// look starts (a joint at or under the floor, the first look passing straight through it), and how little the shape is lifted off
 // what it finds (so the same surface's own draws don't fight it)
 constexpr f32 ShadowProbeRise = 1.0f;
 constexpr f32 ShadowProbeDepth = 100.0f;
+constexpr f32 ShadowSearchBelow = 2.0f;
 constexpr f32 ShadowLift = 0.05f;
 
 void MakeShadowMaterial()
@@ -2103,10 +2178,13 @@ void BeginShadows()
     g_ShadowToScreen = *DesktopGraphics::ViewToScreen();
     // Save current material state to restore after shadows
     g_SavedMaterial3D = SdlGfx::GetMaterial3D();
+    // A pixel takes one shape's coverage between them (the PS2's half-size buffer's own): the shapes over each other don't stack
+    SdlGfx::BeginShadowMask();
 }
 
 void EndShadows()
 {
+    SdlGfx::EndShadowMask();
     // Restore material state so subsequent rendering (UI, etc.) isn't affected by shadow settings
     SdlGfx::SetMaterial3D(g_SavedMaterial3D);
 }
@@ -2144,7 +2222,9 @@ void DrawShadowMesh(RigidModel* mesh, const Matrix4x4* toScreen, const Matrix4x4
     {
         const Vector4* at = RowOf(world, 3);
         // The light casts straight down (the lighting constants' shadow direction is down), so the floor under the shape is
-        // straight below its joint, in the chunk the view looks through
+        // straight below its joint, in the chunk the view looks through. A floor solid to the player or to objects is taken
+        // (both are drawn ground the shape lies over, water included)
+        constexpr u32 SolidGround = SurfaceFlags::SolidToPlayerProbes | SurfaceFlags::SolidToObjects;
         InstanceContext* viewCamera = CameraInstance();
         ChunkData* chunk = viewCamera != nullptr ? viewCamera->chunk : nullptr;
         Vector4 from = *at;
@@ -2153,8 +2233,21 @@ void DrawShadowMesh(RigidModel* mesh, const Matrix4x4* toScreen, const Matrix4x4
         from.w = 1.0f;
         to.y = from.y - ShadowProbeDepth;
         Vector4 hit;
-        if (chunk != nullptr &&
-            GetCollisionCheck(chunk, &from, &to, SurfaceFlags::SolidToPlayerProbes, nullptr, &hit, nullptr) != 0)
+        bool found = chunk != nullptr && GetCollisionCheck(chunk, &from, &to, SolidGround, nullptr, &hit, nullptr) != 0;
+        if (!found && chunk != nullptr)
+        {
+            // The first look went straight through (a joint at or under the floor): a second one from just below it looking up,
+            // which takes only a floor right at the shape (one further off above it is another surface altogether)
+            Vector4 upFrom = *at;
+            upFrom.y = upFrom.y - ShadowSearchBelow;
+            upFrom.w = 1.0f;
+            Vector4 upTo = upFrom;
+            upTo.y = upTo.y + (ShadowSearchBelow + ShadowProbeRise);
+            found = GetCollisionCheck(chunk, &upFrom, &upTo, SolidGround, nullptr, &hit, nullptr) != 0 &&
+                    hit.y <= at->y + ShadowProbeRise;
+        }
+
+        if (found)
         {
             // The floor found, from the joint's own place (the mesh's matrix carries the world it draws in): the shape's world
             // y is moved by it, which is a step along the world y axis' image on the screen
