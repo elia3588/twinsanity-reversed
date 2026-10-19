@@ -1,9 +1,10 @@
 #include "platform/stream.h"
 #include "platform/files.h"
 
+#include "sound_internal.h"
+
 #include <cstdlib>
 #include <cstring>
-#include <map>
 #include <vector>
 
 // The desktop's side of Platform::Stream: read from disc files on host filesystem
@@ -80,6 +81,7 @@ s32 OpenFile(const char* path)
     {
         return NoFile;
     }
+
     // The disc path straight to the host's files (Platform::Files matches the case)
     s32 fd = Platform::Files::Open(path, Platform::Files::OpenRead);
     if (fd < 0)
@@ -133,8 +135,13 @@ void Read(s32 channel, s32 file, u32 offset, u32 size, void* destination)
 
 void ReadSoundBank(s32 channel, u32 bank, s32 file, u32 offset, u32 size)
 {
-    (void)bank;
-    Read(channel, file, offset, size, nullptr); // not used for samples in same way
+    // The bank's samples land in their own block of the sound processor's memory tagged by the sound's number, and a sound
+    // read again gets a block of its own so a voice's playing one stays whole (DesktopSound's sound memory)
+    void* buffer = DesktopSound::BankBuffer(bank, size);
+    if (buffer != nullptr)
+    {
+        Read(channel, file, offset, size, buffer);
+    }
 }
 
 bool IsReading(s32 channel)

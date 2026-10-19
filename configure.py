@@ -181,8 +181,10 @@ SDL2_FETCHED = HERE / "build" / "sdl2" / SDL2_MINGW_FOLDER
 # What SDL2's pkg-config file adds for programs whose main SDL2main wraps in Windows' GUI programs' WinMain: the desktop has its
 # own main (SDL_MAIN_HANDLED) and stays a console program
 SDL2_MAIN_FLAGS = ["-Dmain=SDL_main", "-lSDL2main", "-mwindows"]
-# The desktop's file using SDL2 (its window), built for the host's own layouts (DESKTOP_LAYOUT_FLAGS)
-SDL2_SOURCES = ["src/platform/desktop/window.cpp", "src/platform/desktop/sdl_gfx.cpp", "src/platform/desktop/crash.cpp"]
+# The desktop's files using SDL2 (the window, the graphics and the crash handler, the audio), built for the host's own layouts
+# (DESKTOP_LAYOUT_FLAGS): the audio of them touches none of the game's structs, only SDL's
+SDL2_SOURCES = ["src/platform/desktop/window.cpp", "src/platform/desktop/sdl_gfx.cpp", "src/platform/desktop/crash.cpp",
+                "src/platform/desktop/audio.cpp"]
 
 
 def sdl2_folder(windows):
