@@ -217,7 +217,7 @@ results differ in their last bits, which the game takes in its stride but a repl
 
 What the shared C++ does only on the PS2 is inside `#if defined(_EE)`: PS2SDK's types (`common.h` has its own elsewhere), the
 calls in the retail convention (elsewhere `RETAIL_N32` gives the C++ function its retail name, `EABI_EXPORT` and `EABI_IMPORT`
-are nothing and `Abi::CallEabi` is a plain call), the four hand-written adapters of calls with arguments on the stack, the few
+are nothing and `Abi::CallEabi` orders the arguments for the host, see below), the four hand-written adapters of calls with arguments on the stack, the few
 instructions the game's C++ has (`CopyQuadword`'s `lq`/`sq`, `Touch`'s `lb`, `Kept`'s register), and the retail data's objects
 that point at the PS2 side's functions. Besides `include/platform/`'s interfaces, a platform's side defines these, which the
 game's headers declare under their retail names:
@@ -300,8 +300,13 @@ EABI's way, so on the PS2 the two conventions stay apart where they differ:
 - the stack stays 16 byte aligned (n32's), which `lq`/`sq` need; GCC's EABI only keeps 8;
 - divisions don't trap on 0 (`-mno-check-zero-division`), the retail ones don't.
 
-Elsewhere there's only the C++'s convention: `RETAIL_N32` gives the C++ function the retail name itself, `EABI_EXPORT` and
-`EABI_IMPORT` are nothing, `CallEabi` is a plain call and the hand-written entries are left out (`#if defined(_EE)`).
+Elsewhere (the desktop) `RETAIL_N32` gives the C++ function the retail name itself, `EABI_EXPORT` and `EABI_IMPORT` are nothing
+and the hand-written entries are left out (`#if defined(_EE)`). The calls through the retail vtables and function pointers still
+need the order their C++ declarations read: the EABI kept integers and floats apart, so a retail call's order between the two
+kinds is arbitrary, while the host reads the arguments in the order they're declared. A mixed call is therefore given the order
+the retail declarations use — the object, then every float in the call's order, then every other integer — by `CallVirtual`
+(`Abi::CallObjectFirst`), and a function reached that way has to be declared in that order: `entry.cpp` has adapters for the
+retail data's slots whose declarations differ. `CallEabi` does the same without an object (every float, then every integer).
 
 Classes with a vtable (a GCC 2.9x one, still in the retail data) are C++ classes whose methods carry the retail names
 (`RETAIL(FUN_...)`); their vtable pointer stays where GCC 2.9x put it and virtual calls go through `CallVirtual`. The base class
