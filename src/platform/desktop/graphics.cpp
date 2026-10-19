@@ -991,6 +991,11 @@ void WaitIdle()
 
 void StartRenderer(s32 height, bool pal)
 {
+    // The game's display size, which the PS2's InitDisplay records: the particle systems' render tables take the screen's aspect
+    // from it, and the movies their own. The width is the PS2's frame width (the game passes the screen's height)
+    (void)pal;
+    g_DisplayWidth = static_cast<u32>(g_RendererWidth);
+    g_DisplayHeight = static_cast<u32>(height);
     DesktopWindow::Open();
 }
 
@@ -1294,18 +1299,41 @@ void MakeDistortionMaterial(Material* material)
 
 void ChainParticleBlocks(u8* const* blocks, s32 count)
 {
+    // The PS2 chains the blocks' DMA packets to draw them in one go; the desktop reads each block's own records where the game
+    // wrote them, so nothing is chained
 }
 
 void EndParticleBlock(u8* block)
 {
 }
 
+// The particles' records are the game's own (it writes them after the packet header the PS2 puts at the block's front); a block
+// the game has only just made has no records yet, so its records are made dead here and it draws nothing until they're filled
 void InitParticleBlock(u8* block, bool hexagons)
 {
+    constexpr f32 DeadLifeScale = 32768.0f;
+    constexpr s32 BlockParticles = 32;
+    constexpr s32 HexagonBlockParticles = 12;
+    if (block == nullptr)
+    {
+        return;
+    }
+
+    s32 particles = hexagons ? HexagonBlockParticles : BlockParticles;
+    auto* records = reinterpret_cast<ParticleRecord*>(block + ParticleBlockHeader);
+    for (s32 record = 0; record < particles; record++)
+    {
+        records[record].spawnTime = 0.0f;
+        records[record].lifeScale = DeadLifeScale;
+    }
 }
 
 void InitParticleRenderTable(u8* table)
 {
+    if (table != nullptr)
+    {
+        std::memset(table, 0, ParticleRenderTableBytes);
+    }
 }
 
 void InitParticleGraphics()
@@ -1314,14 +1342,135 @@ void InitParticleGraphics()
 
 void WriteParticleRenderTable(u8* table, const ParticleLook& look)
 {
+    static_assert(sizeof(ParticleLook) <= ParticleRenderTableBytes, "a particle look has to fit its render table");
+    if (table != nullptr)
+    {
+        std::memcpy(table, &look, sizeof(ParticleLook));
+    }
 }
 
+// One block's particles drawn as camera-facing quads from the block's system's render table: each record's place, and its shape,
+// colour and alpha at the step of its life, through the block's matrix (ParticleBlockView's). The PS2 hands the same table and
+// records to VU1 (the shader of type 0x12), which builds the quads' clip places; the shapes are the game's own
 void DrawParticleBlock(u8* block, u8* table, const Matrix4x4* matrix, Material* material, f32 time)
 {
+    if (block == nullptr || table == nullptr || matrix == nullptr)
+    {
+        return;
+    }
+
+    s32 windowWidth = 0;
+    s32 windowHeight = 0;
+    SdlGfx::GetSize(&windowWidth, &windowHeight);
+    if (windowWidth <= 0 || windowHeight <= 0 || g_ScreenWidthPx <= 0 || g_ScreenHeightPx <= 0)
+    {
+        return;
+    }
+
+    constexpr f32 Subpixels = 16.0f;
+    constexpr f32 DepthRange = 8388607.0f;
+    constexpr f32 NearClip = 0.5f;
+    constexpr f32 DeadLifeScale = 32768.0f;
+    constexpr s32 BlockParticles = 32;
+
+    const auto* look = reinterpret_cast<const ParticleLook*>(table);
+    auto* desktop = reinterpret_cast<DesktopGraphics::Material*>(material);
+    DesktopGraphics::Texture* texture = MaterialTexture(desktop);
+    void* sdlTexture = texture != nullptr ? texture->sdlTexture : nullptr;
+    f32 textureWidth = texture != nullptr && texture->width != 0 ? static_cast<f32>(texture->width) : 1.0f;
+    f32 textureHeight = texture != nullptr && texture->height != 0 ? static_cast<f32>(texture->height) : 1.0f;
+
+    // The texture's rectangle: the game's texel sixteenths over the low bits (the files bias the pixels by 2^19, which the GS's
+    // 12.4 fixed point drops), the whole page over the window's texture
+    f32 u0 = static_cast<f32>(look->texture[0] & 0xFFFF) / 16.0f / textureWidth;
+    f32 v0 = static_cast<f32>(look->texture[1] & 0xFFFF) / 16.0f / textureHeight;
+    f32 u1 = static_cast<f32>(look->texture[2] & 0xFFFF) / 16.0f / textureWidth;
+    f32 v1 = static_cast<f32>(look->texture[3] & 0xFFFF) / 16.0f / textureHeight;
+
+    f32 across = static_cast<f32>(windowWidth) / static_cast<f32>(g_ScreenWidthPx);
+    f32 down = static_cast<f32>(windowHeight) / static_cast<f32>(g_ScreenHeightPx);
+
+    SetMaterialState(desktop);
+
+    auto* records = reinterpret_cast<ParticleRecord*>(block + ParticleBlockHeader);
+    for (s32 index = 0; index < BlockParticles; index++)
+    {
+        const ParticleRecord& record = records[index];
+        // A record never started (no life scale) or made dead draws nothing; one the game let go of has its start far in the
+        // future, so its life is whole lives before it begins and it draws nothing either
+        if (!(record.lifeScale > 0.0f) || record.lifeScale >= DeadLifeScale)
+        {
+            continue;
+        }
+
+        f32 age = time - record.spawnTime;
+        f32 life = age * record.lifeScale;
+        if (!(life < static_cast<f32>(ParticleRenderSteps)) || life < -static_cast<f32>(ParticleRenderSteps))
+        {
+            continue;
+        }
+
+        s32 step = static_cast<s32>(life);
+        if (step < 0)
+        {
+            step = 0;
+        }
+        else if (step >= static_cast<s32>(ParticleRenderSteps))
+        {
+            step = static_cast<s32>(ParticleRenderSteps) - 1;
+        }
+
+        const ParticleLook::Step& draw = look->steps[step];
+        // The record's place: its start, its velocity over its age, and its gravity (half an acceleration) over the age squared
+        Vector4 base = {record.start[0] + record.velocity[0] * age,
+                        record.start[1] + record.velocity[1] * age + look->gravity * age * age,
+                        record.start[2] + record.velocity[2] * age, 1.0f};
+        Vector4 clip;
+        VuTransformPoint(matrix, &base, &clip);
+        if (clip.w < NearClip)
+        {
+            continue;
+        }
+
+        // The quad's corners in the particle's own space: two opposite corners and the edge between them, the table's own shape.
+        // The VU1 adds them to the clip place before the divide (D_002CBD0's add.xy before its mulq by 1/w), so the quad turns
+        // with the view and shrinks with distance as the game's own
+        const f32 cornersX[4] = {draw.shape[0], draw.shape[0] + draw.shape[2], draw.shape[4], draw.shape[4] - draw.shape[2]};
+        const f32 cornersY[4] = {draw.shape[1], draw.shape[1] + draw.shape[3], draw.shape[5], draw.shape[5] - draw.shape[3]};
+        const f32 cornerU[4] = {u0, u0, u1, u1};
+        const f32 cornerV[4] = {v0, v1, v1, v0};
+        u8 red = ScaleChannel(draw.colour[0], 128);
+        u8 green = ScaleChannel(draw.colour[1], 128);
+        u8 blue = ScaleChannel(draw.colour[2], 128);
+        u8 alpha = ScaleChannel(draw.colour[3], 128);
+
+        f32 inverse = 1.0f / clip.w;
+        SdlGfx::Vertex3D screen[4];
+        for (u32 corner = 0; corner < 4; corner++)
+        {
+            f32 x = (clip.x + cornersX[corner]) * inverse;
+            f32 y = (clip.y + cornersY[corner]) * inverse;
+            SdlGfx::Vertex3D& out = screen[corner];
+            out.x = (x / Subpixels - static_cast<f32>(g_TargetX)) * across;
+            out.y = (y / Subpixels - static_cast<f32>(g_TargetY)) * down;
+            out.z = 1.0f - clip.z * inverse / (2.0f * DepthRange);
+            out.red = red;
+            out.green = green;
+            out.blue = blue;
+            out.alpha = alpha;
+            out.u = cornerU[corner];
+            out.v = cornerV[corner];
+            out.w = clip.w;
+        }
+
+        SdlGfx::DrawTriangleStrip3D(sdlTexture, screen, 4, true);
+    }
 }
 
 void DrawDistortionBlock(u8* block, u8* table, const Matrix4x4* matrix, Material* material, f32 time, f32 distortionX, f32 distortionY)
 {
+    // The hexagons sample a copy of the frame through the system's distortion on the PS2 (its shader of type 0x18); the desktop
+    // keeps no such copy of it yet, so they draw nothing and the rest of the frame goes on as it is
 }
 
 void DrawDecals(DecalData* decals)
@@ -3143,12 +3292,124 @@ void DrawChunkSky(Sky* sky, RenderView* view)
     SdlGfx::ClearDepthToFar();
 }
 
+namespace
+{
+// Every mode's shader drops what's under 5/128 alpha and tests depth GEQUAL without writing it, as the PS2's ReadParticlePageData
+// gives them; the settings bytes are the files' own, a byte a field (shaderclasses.cpp), the depth test the desktop's DepthFunc3D
+// numbering (2 the GS's GEQUAL)
+constexpr u8 PageAlphaReference = 5;
+constexpr u8 PageAlphaMethod = 5;
+constexpr u8 PageDepthTest = 2;
+
+// A blend mode's shader: its blends, its alpha preset and its depth write, over the page's texture, as the file's own type 0x12
+DesktopGraphics::Shader* NewParticleModeShader(bool decals, u8 blends, u8 preset, u8 noDepthWrites, DesktopGraphics::GameTexture* texture, s16 lodK, s16 lodL)
+{
+    auto* shader = static_cast<DesktopGraphics::Shader*>(MemoryAllocate(sizeof(DesktopGraphics::Shader)));
+    if (shader == nullptr)
+    {
+        return nullptr;
+    }
+
+    std::memset(shader, 0, sizeof(DesktopGraphics::Shader));
+    shader->settings[0] = blends;
+    shader->settings[1] = preset;
+    shader->settings[2] = 1;
+    shader->settings[3] = PageAlphaMethod;
+    shader->settings[4] = PageAlphaReference;
+    shader->settings[5] = 0;
+    shader->settings[8] = PageDepthTest;
+    shader->settings[11] = 1;
+    shader->settings[23] = 1;
+    shader->settings[27] = noDepthWrites;
+    shader->type = decals ? 0x13 : 0x12;
+    shader->lodK = lodK;
+    shader->lodL = lodL;
+    shader->texture = texture;
+    for (u32 channel = 0; channel < 4; channel++)
+    {
+        shader->shaderColour[channel] = channel == 3 ? 1.0f : 0.5f;
+    }
+
+    return shader;
+}
+
+// A blend mode's material over the page's texture, made in the game's own heap as the PS2 makes its own
+void MakeParticleModeMaterial(ParticlePage* page, u32 mode, bool decals, u8 blends, u8 preset, u8 noDepthWrites, DesktopGraphics::GameTexture* texture, s16 lodK, s16 lodL)
+{
+    auto* material = static_cast<DesktopGraphics::Material*>(MemoryAllocate(sizeof(DesktopGraphics::Material)));
+    if (material == nullptr)
+    {
+        return;
+    }
+
+    ConstructDesktopMaterial(material);
+    auto* shader = NewParticleModeShader(decals, blends, preset, noDepthWrites, texture, lodK, lodL);
+    if (shader != nullptr)
+    {
+        material->shaderCount = 1;
+        material->shaders[0] = shader;
+    }
+
+    page->materials[mode] = reinterpret_cast<Material*>(material);
+}
+
+// A page's texture and material read (their IDs from the stream, the resources after them when the stream has them, else the
+// material taken from the material table): mode 2 is the page material's own shader, modes 0, 1 and 3 shaders of their own over
+// the page's texture (the PS2's ReadParticlePageData)
+void ReadParticlePageData(ParticlePage* page, Stream* stream, bool fromStream, bool decals)
+{
+    stream->ReadS32(reinterpret_cast<s32*>(&page->textureId));
+    stream->ReadS32(reinterpret_cast<s32*>(&page->materialId));
+    if (fromStream)
+    {
+        TextureFromStream(page->textureId, stream);
+        page->material = MaterialFromStream(page->materialId, stream);
+    }
+    else
+    {
+        page->material = g_MaterialTable.Acquire(&page->materialId, nullptr);
+    }
+
+    auto* resource = reinterpret_cast<DesktopGraphics::MaterialResource*>(page->material);
+    DesktopGraphics::Material* own = resource != nullptr ? resource->material : nullptr;
+    page->materials[BlendPageMaterial] = reinterpret_cast<Material*>(own);
+
+    DesktopGraphics::GameTexture* texture = nullptr;
+    s16 lodK = 0;
+    s16 lodL = 0;
+    DesktopGraphics::Shader* pageShader = own != nullptr && own->shaderCount != 0 ? own->shaders[0] : nullptr;
+    if (pageShader != nullptr)
+    {
+        // The page's own shader is mode 2's: made to blend and test like the modes', its own type left alone
+        pageShader->settings[0] = 1;
+        pageShader->settings[2] = 1;
+        pageShader->settings[3] = PageAlphaMethod;
+        pageShader->settings[4] = PageAlphaReference;
+        pageShader->settings[5] = 0;
+        pageShader->settings[8] = PageDepthTest;
+        pageShader->settings[27] = 1;
+        texture = pageShader->texture;
+        lodK = pageShader->lodK;
+        lodL = pageShader->lodL;
+    }
+
+    MakeParticleModeMaterial(page, BlendAdditive, decals, 1, 1, 1, texture, lodK, lodL);
+    MakeParticleModeMaterial(page, BlendSubtractive, decals, 1, 2, 1, texture, lodK, lodL);
+    MakeParticleModeMaterial(page, BlendCutout, decals, 0, 0, 0, texture, lodK, lodL);
+}
+}
+
 void LoadParticlePage(ParticlePage* page, const char* path, bool decals)
 {
+    MemoryStream stream;
+    MemoryStream::ConstructFromFile(&stream, path, false);
+    ReadParticlePageData(page, &stream, true, decals);
+    stream.Destroy(DestroyOnly);
 }
 
 void ReadParticlePage(ParticlePage* page, Stream* stream, bool decals)
 {
+    ReadParticlePageData(page, stream, false, decals);
 }
 
 }
