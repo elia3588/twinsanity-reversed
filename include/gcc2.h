@@ -31,8 +31,16 @@ inline Result CallVirtual(const void* object, const GccVTableEntry* vtable, u32 
         return reinterpret_cast<Result (*)(void*, Args...)>(entry.function)(self, args...);
     }
 #else
-    // Elsewhere the entries are the C++ functions themselves, whose arguments are in their declaration's order
-    return reinterpret_cast<Result (*)(void*, Args...)>(entry.function)(self, args...);
+    // Elsewhere the entries are the C++ functions themselves, whose arguments are in their declaration's order: a mixed call
+    // is given that order (the object, then the floats, then the other integers), which the entry's adapter takes
+    if constexpr (Abi::IsMixed<void*, Args...>)
+    {
+        return Abi::CallObjectFirst<Result>(entry.function, self, args...);
+    }
+    else
+    {
+        return reinterpret_cast<Result (*)(void*, Args...)>(entry.function)(self, args...);
+    }
 #endif
 }
 

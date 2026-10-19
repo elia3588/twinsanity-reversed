@@ -322,4 +322,19 @@ inline Result CallEabi(const void* function, Args... args)
     }
 #endif
 }
+
+// A call through a retail vtable on a host whose convention reads the arguments in their declared order: the EABI keeps the
+// integers and the floats apart, so the call site's own order between the two kinds is arbitrary, while the host's is the
+// order the function was declared with. The call is given the order the retail functions' declarations use — the object,
+// then every float (in the call's order), then every other integer — and the entry called must take that order (an adapter
+// orders its own parameters so, and the members already declared with their floats after their object don't change)
+template <typename Result, typename Self, typename... Args>
+inline Result CallObjectFirst(const void* function, Self self, Args... args)
+{
+    auto floats = std::tuple_cat(KeptValue<IsFloat<Args>>(args)...);
+    auto integers = std::tuple_cat(KeptValue<!IsFloat<Args>>(args)...);
+    auto ordered = std::tuple_cat(std::tuple<Self>(self), floats, integers);
+    using Function = typename ArgumentsFunction<Result, decltype(ordered)>::Type;
+    return std::apply(reinterpret_cast<Function>(const_cast<void*>(function)), ordered);
+}
 }
