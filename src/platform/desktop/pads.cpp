@@ -155,17 +155,6 @@ s32 Read(s32 port, s32 slot, u8* data)
     }
 
     FillReport(data, g_TestPadButtons | DesktopWindow::PadButtons() | ScriptedPad());
-    // TEMP trace
-    {
-        static u32 lastHeld = 0;
-        u32 heldNow = g_TestPadButtons | DesktopWindow::PadButtons() | ScriptedPad();
-        if (heldNow != lastHeld)
-        {
-            lastHeld = heldNow;
-            std::printf("read held 0x%X\n", heldNow);
-            std::fflush(stdout);
-        }
-    }
     return 1;
 }
 

@@ -3,8 +3,6 @@
 #include "sound_internal.h"
 
 #include <cmath>
-#include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -59,10 +57,13 @@ constexpr s32 PredictCoeffs[5][2] = {
 struct Bank
 {
     std::vector<u8> samples;
+    // The samples' own end in samples (up to and with the block carrying the end flag), the blocks after it the read's padding
+    // of the sound's size that must not be played; 0 while the whole bank is the samples' (the music's own banks)
+    u32 validSamples = 0;
 };
 
 // The sound memory's blocks by their sounds' numbers (the reads' banks land here, and DesktopSound::BankBuffer fills them)
-std::unordered_map<u32, std::shared_ptr<const Bank>> g_Sounds;
+std::unordered_map<u32, std::shared_ptr<Bank>> g_Sounds;
 
 // The sound memory's own addresses, the game's music buffers keep (sound.cpp keeps the values and nothing of ours does)
 u32 g_MemoryAddress = 0x100000;
@@ -161,18 +162,14 @@ bool g_Paused = false;
 // The ramp's own place: 1 sounding, 0 silent, stepped a few milliseconds over
 f32 g_PauseGain = 1.0f;
 
-// The mix's own dump (TWINSANITY_AUDIO_DUMP a path): the mixed frames into a raw stereo 16-bit file, for looking at the mix's
-// contents without an ear
-FILE* g_MixDump = nullptr;
-
-// TEMP trace: the mixed frames run whole, and a voice's own last frame's sound, for telling a click's own voice and event
-u64 g_MixFrames = 0;
-f32 g_PrevVoiceOut[Voices][2];
-f32 g_VoiceAvgJump[Voices];
-
-// The sample's whole length in samples (blocks of 28)
+// The sample's whole length in samples (blocks of 28, up to the end flag's own block)
 u32 TotalSamplesOf(const Voice& voice)
 {
+    if (voice.bank->validSamples != 0)
+    {
+        return voice.bank->validSamples;
+    }
+
     return voice.bank->samples.size() / 16 * 28;
 }
 
@@ -205,9 +202,11 @@ void DecodeBlockInto(Voice& voice, u32 blockIndex, s16* window)
 
     const std::vector<u8>& samples = voice.bank->samples;
     u32 at = blockIndex * 16;
-    if (at + 16 > samples.size())
+    u32 end = voice.bank->validSamples != 0 ? voice.bank->validSamples : static_cast<u32>(samples.size()) / 16 * 28;
+    if (at + 16 > samples.size() || blockIndex * 28 >= end)
     {
-        // A place past the sample's own end (a play of a short or empty bank) silent of its own
+        // A place past the sample's own end (a play of a short or empty bank, or the read's padding after the end flag) silent
+        // of its own
         for (u32 i = 0; i < 28; i++)
         {
             window[i] = 0;
@@ -345,14 +344,6 @@ void StartRelease(Voice& voice)
     }
 
     voice.releaseFactor = std::powf(0.5f, 1.0f / (ReleaseHalfSeconds * voice.releaseScale * MixRate));
-    if (voice.envelope != EnvelopeRelease)
-    {
-        // TEMP trace
-        std::fprintf(stderr, "rel f=%.3f v=%u g=%u lvl=%.3f\n", static_cast<double>(g_MixFrames) / MixRate,
-                     static_cast<u32>(&voice - g_VoiceTable), voice.group, voice.level);
-        std::fflush(stderr);
-    }
-
     voice.envelope = EnvelopeRelease;
 }
 
@@ -392,15 +383,17 @@ void Mix(Uint8* stream, int bytes)
     s16* frame = reinterpret_cast<s16*>(stream);
     u32 frames = static_cast<u32>(bytes) / 4;
     const f32 attackStep = 1.0f / (AttackSeconds * MixRate);
-    // The pause's own ramp: a few milliseconds to silence or back (a step of one frame)
-    const f32 pauseStep = 1.0f / (0.005f * MixRate);
+    // The pause's own ramp: a slower fall (the front end toggles the pause every frame around a menu and a fast fall would
+    // pump the music) and a quick rise, so a held pause silences and a let go snaps back
+    const f32 pauseFallStep = 1.0f / (0.15f * MixRate);
+    const f32 pauseRiseStep = 1.0f / (0.03f * MixRate);
     for (u32 frameIndex = 0; frameIndex < frames; frameIndex++)
     {
         // The pause's own place stepped to what the game last asked for
         f32 pauseTarget = g_Paused ? 0.0f : 1.0f;
         if (g_PauseGain < pauseTarget)
         {
-            g_PauseGain += pauseStep;
+            g_PauseGain += pauseRiseStep;
             if (g_PauseGain > pauseTarget)
             {
                 g_PauseGain = pauseTarget;
@@ -408,7 +401,7 @@ void Mix(Uint8* stream, int bytes)
         }
         else if (g_PauseGain > pauseTarget)
         {
-            g_PauseGain -= pauseStep;
+            g_PauseGain -= pauseFallStep;
             if (g_PauseGain < pauseTarget)
             {
                 g_PauseGain = pauseTarget;
@@ -422,9 +415,6 @@ void Mix(Uint8* stream, int bytes)
             Voice& voice = g_VoiceTable[index];
             if (!voice.taken || !voice.bank || voice.envelope == EnvelopeOff)
             {
-                g_PrevVoiceOut[index][0] = 0.0f;
-                g_PrevVoiceOut[index][1] = 0.0f;
-                g_VoiceAvgJump[index] = 0.0f;
                 continue;
             }
 
@@ -468,14 +458,11 @@ void Mix(Uint8* stream, int bytes)
                         voice.windowNextBlock = 0xFFFFFFFF;
                         voice.old1 = 0;
                         voice.old2 = 0;
-                        // TEMP trace
-                        std::fprintf(stderr, "loop f=%.3f v=%u g=%u to=%u\n", static_cast<double>(g_MixFrames) / MixRate,
-                                     index, voice.group, voice.loopBlock * 28);
-                        std::fflush(stderr);
                     }
                     else
                     {
-                        ResetDecode(voice);
+                        // The sample's own length through: its sound let go of from where it is (silence after the end flag's
+                        // block), never started over, whose first sample would sound again at the play's own level
                         StartRelease(voice);
                     }
                 }
@@ -491,28 +478,6 @@ void Mix(Uint8* stream, int bytes)
 
             left += static_cast<f32>(sample) * leftGain;
             right += static_cast<f32>(sample) * rightGain;
-
-            // TEMP trace: a voice's own sound jumping far over its own recent walk (a click), with where and in what state
-            {
-                f32 nowLeft = static_cast<f32>(sample) * leftGain;
-                f32 nowRight = static_cast<f32>(sample) * rightGain;
-                f32 dLeft = std::fabs(nowLeft - g_PrevVoiceOut[index][0]);
-                f32 dRight = std::fabs(nowRight - g_PrevVoiceOut[index][1]);
-                f32 jump = dLeft > dRight ? dLeft : dRight;
-                if (jump > 3000.0f && jump > 10.0f * g_VoiceAvgJump[index])
-                {
-                    std::fprintf(stderr, "click f=%.3f v=%u g=%u pos=%u inblk=%u env=%u lvl=%.3f prev=%.0f now=%.0f avg=%.0f\n",
-                                 static_cast<double>(g_MixFrames) / MixRate, index, voice.group, voice.position,
-                                 voice.position % 28, static_cast<u32>(voice.envelope), voice.level,
-                                 static_cast<double>(g_PrevVoiceOut[index][0]), static_cast<double>(nowLeft),
-                                 static_cast<double>(g_VoiceAvgJump[index]));
-                    std::fflush(stderr);
-                }
-
-                g_VoiceAvgJump[index] = g_VoiceAvgJump[index] * 0.999f + jump * 0.001f;
-                g_PrevVoiceOut[index][0] = nowLeft;
-                g_PrevVoiceOut[index][1] = nowRight;
-            }
 
             // The envelope's rise and fall (the sample sounding while it falls)
             switch (voice.envelope)
@@ -533,10 +498,6 @@ void Mix(Uint8* stream, int bytes)
                     voice.taken = false;
                     voice.bank = nullptr;
                     voice.envelope = EnvelopeOff;
-                    // TEMP trace
-                    std::fprintf(stderr, "free f=%.3f v=%u g=%u\n", static_cast<double>(g_MixFrames) / MixRate, index,
-                                 voice.group);
-                    std::fflush(stderr);
                 }
                 break;
             default:
@@ -566,40 +527,6 @@ void Mix(Uint8* stream, int bytes)
 
         frame[frameIndex * 2] = static_cast<s16>(outLeft);
         frame[frameIndex * 2 + 1] = static_cast<s16>(outRight);
-        g_MixFrames++;
-    }
-
-    if (g_MixDump != nullptr && frames != 0)
-    {
-        std::fwrite(stream, 1, static_cast<size_t>(frames) * 4, g_MixDump);
-    }
-
-    // TEMP trace: the mix's own heartbeat and who holds voices (the callback running shows as the seconds counting up)
-    static u32 acc = 0;
-    static u32 secs = 0;
-    acc += frames;
-    if (acc >= MixRate)
-    {
-        acc -= MixRate;
-        secs++;
-        if (secs <= 60)
-        {
-            std::fprintf(stderr, "mix %u:", secs);
-            for (u32 v = 0; v < Voices; v++)
-            {
-                if (!g_VoiceTable[v].taken)
-                {
-                    continue;
-                }
-
-                std::fprintf(stderr, " v%u{p%u/28 e%u l%.2f L%d g%u}", v, g_VoiceTable[v].position,
-                             u32(g_VoiceTable[v].envelope), g_VoiceTable[v].level, g_VoiceTable[v].left,
-                             g_VoiceTable[v].group);
-            }
-
-            std::fprintf(stderr, "\n");
-            std::fflush(stderr);
-        }
     }
 }
 
@@ -634,12 +561,6 @@ void MakeDevice()
     {
         SDL_PauseAudioDevice(g_Device, 0);
     }
-
-    const char* dump = std::getenv("TWINSANITY_AUDIO_DUMP");
-    if (dump != nullptr && *dump != 0)
-    {
-        g_MixDump = std::fopen(dump, "wb");
-    }
 }
 } // namespace
 } // namespace Platform::Audio
@@ -656,8 +577,33 @@ void* BankBuffer(u32 sound, u32 size)
 
     auto* bank = new Platform::Audio::Bank();
     bank->samples.resize(size);
-    Platform::Audio::g_Sounds[sound] = std::shared_ptr<const Platform::Audio::Bank>(bank);
+    Platform::Audio::g_Sounds[sound] = std::shared_ptr<Platform::Audio::Bank>(bank);
     return bank->samples.data();
+}
+
+void BankLoaded(u32 sound, u32 size)
+{
+    auto item = Platform::Audio::g_Sounds.find(sound);
+    if (item == Platform::Audio::g_Sounds.end())
+    {
+        return;
+    }
+
+    // The samples' own end: the first block carrying the end flag is the last of them. The read takes the sound's size whole,
+    // which rounds up past the flag's block, and the padding after it (nibbles of 7 with no shift, a full scale stay) would
+    // otherwise be played as a loud tick at every sound's end
+    const std::vector<u8>& samples = item->second->samples;
+    u32 blocks = static_cast<u32>(samples.size()) / 16;
+    for (u32 block = 0; block < blocks; block++)
+    {
+        if ((samples[block * 16 + 1] & 0x1) != 0)
+        {
+            item->second->validSamples = (block + 1) * 28;
+            break;
+        }
+    }
+
+    (void)size;
 }
 } // namespace DesktopSound
 
@@ -729,17 +675,11 @@ void PauseAll()
     // The game's own pause (MsPauseAll): the effects and music ramp to silence and hold, the movies', the menus' and the
     // speech's own sounds (group 4) keep sounding. The movie's end is the module's own resume (ReclaimFromMovie below)
     g_Paused = true;
-    // TEMP trace
-    std::fprintf(stderr, "pause\n");
-    std::fflush(stderr);
 }
 
 void ResumeAll()
 {
     g_Paused = false;
-    // TEMP trace
-    std::fprintf(stderr, "resume\n");
-    std::fflush(stderr);
 }
 
 s32 LendToMovie()
@@ -754,9 +694,6 @@ s32 ReclaimFromMovie()
     // and never pairs it with a ResumeSound of its own, so the letting go has to be here or the pause would leak on over the
     // front end's menus and silence them
     g_Paused = false;
-    // TEMP trace
-    std::fprintf(stderr, "reclaim-resume\n");
-    std::fflush(stderr);
     return 0;
 }
 
@@ -933,76 +870,15 @@ void KeyOnVoice(Voice& itemVoice, const std::shared_ptr<const Bank>& bank, u32 g
     SetReleaseRate(itemVoice, releaseRate);
     // A play's count of its own (so many plays, or 0 of them until the voice is let go of)
     itemVoice.loopsLeft = loops;
-    // TEMP trace
-    {
-        u32 was = static_cast<u32>(itemVoice.envelope);
-        ResetDecode(itemVoice);
-        itemVoice.level = 0.0f;
-        itemVoice.envelope = EnvelopeAttack;
-        std::fprintf(stderr, "ko f=%.3f v=%u g=%u pitch=0x%X loops=%u was=%u\n", static_cast<double>(g_MixFrames) / MixRate,
-                     static_cast<u32>(&itemVoice - g_VoiceTable), group, pitch, loops, was);
-        std::fflush(stderr);
-    }
+    ResetDecode(itemVoice);
+    itemVoice.level = 0.0f;
+    itemVoice.envelope = EnvelopeAttack;
 }
 
 void TerminateVoice(Voice& itemVoice)
 {
     SetReleaseRate(itemVoice, PlayReleaseRate);
     StartRelease(itemVoice);
-}
-
-// TEMP: a sound's own samples decoded whole into a WAV (TWINSANITY_SFX_DUMP a folder), the mixer's own decode with the pitch's
-// step left out, so a click's own place in the sample's blocks can be heard and counted
-void DumpSoundWav(const char* folder, u32 sound, const std::shared_ptr<const Bank>& bank)
-{
-    char path[512];
-    std::snprintf(path, sizeof(path), "%s/sfx_%u.wav", folder, sound);
-    FILE* file = std::fopen(path, "wb");
-    if (file == nullptr)
-    {
-        return;
-    }
-
-    u32 blocks = static_cast<u32>(bank->samples.size()) / 16;
-    std::vector<s16> pcm;
-    pcm.reserve(static_cast<size_t>(blocks) * 28);
-    Voice voice;
-    voice.bank = bank;
-    s16 window[28];
-    for (u32 block = 0; block < blocks; block++)
-    {
-        DecodeBlockInto(voice, block, window);
-        for (u32 i = 0; i < 28; i++)
-        {
-            pcm.push_back(window[i]);
-        }
-    }
-
-    u32 dataBytes = static_cast<u32>(pcm.size()) * 2;
-    u8 header[44] = {0};
-    u32 riff = 36 + dataBytes;
-    u32 fmtSize = 16;
-    u16 audioFormat = 1;
-    u16 channels = 1;
-    u32 rate = static_cast<u32>(MixRate);
-    u32 byteRate = static_cast<u32>(MixRate) * 2;
-    u16 blockAlign = 2;
-    u16 bits = 16;
-    std::memcpy(header, "RIFF", 4);
-    std::memcpy(header + 4, &riff, 4);
-    std::memcpy(header + 8, "WAVEfmt ", 8);
-    std::memcpy(header + 16, &fmtSize, 4);
-    std::memcpy(header + 20, &audioFormat, 2);
-    std::memcpy(header + 22, &channels, 2);
-    std::memcpy(header + 24, &rate, 4);
-    std::memcpy(header + 28, &byteRate, 4);
-    std::memcpy(header + 32, &blockAlign, 2);
-    std::memcpy(header + 34, &bits, 2);
-    std::memcpy(header + 36, "data", 4);
-    std::memcpy(header + 40, &dataBytes, 4);
-    std::fwrite(header, 1, sizeof(header), file);
-    std::fwrite(pcm.data(), 2, pcm.size(), file);
-    std::fclose(file);
 }
 
 s32 PlaySound(u32 sound, u32 voiceAndGroup, s16 left, s16 right, u16 pitch, u32 attack, u32 release, u32 loops)
@@ -1029,34 +905,10 @@ s32 PlaySound(u32 sound, u32 voiceAndGroup, s16 left, s16 right, u16 pitch, u32 
         return -1;
     }
 
-    // TEMP: the sound's own samples into a WAV the first time it plays, for hearing a click's own place
-    {
-        static const char* dumpFolder = std::getenv("TWINSANITY_SFX_DUMP");
-        static std::unordered_map<u32, bool> dumped;
-        if (dumpFolder != nullptr && *dumpFolder != 0 && dumped.find(sound) == dumped.end())
-        {
-            dumped[sound] = true;
-            DumpSoundWav(dumpFolder, sound, item->second);
-        }
-    }
-
     SDL_LockAudioDevice(g_Device);
     KeyOnVoice(g_VoiceTable[voice], item->second, (voiceAndGroup >> GroupShift) & 0xFFFF, left, right, pitch,
                PlayReleaseRate, loops, true);
     SDL_UnlockAudioDevice(g_Device);
-    // TEMP trace: the front end's and the movie's sounds (the ids 0x8000 and up) with what they were keyed by
-    if (sound >= 0x8000)
-    {
-        static u32 plays = 0;
-        if (plays < 120)
-        {
-            plays++;
-            std::fprintf(stderr, "ps s=%u v=%d g=%u L=%d R=%d pitch=0x%X loops=%u bytes=%u paused=%u\n", sound, voice,
-                         (voiceAndGroup >> GroupShift) & 0xFFFF, left, right, pitch, loops,
-                         static_cast<u32>(item->second->samples.size()), g_Paused ? 1u : 0u);
-            std::fflush(stderr);
-        }
-    }
 
     (void)attack;
     (void)release;
@@ -1249,18 +1101,6 @@ s32 PlayMusic(s32 channel)
     }
 
     stream->playing = true;
-    // TEMP trace
-    static u32 played = 0;
-    if (played < 20)
-    {
-        played++;
-        std::fprintf(stderr, "music play ch=%d file=%u voice=%u child=%u group=%u once=%d left=%u right=%u\n", channel,
-                     stream->file, stream->voice, stream->childVoice, stream->group, stream->once ? 1 : 0,
-                     stream->left != nullptr ? static_cast<u32>(stream->left->samples.size()) : 0,
-                     stream->right != nullptr ? static_cast<u32>(stream->right->samples.size()) : 0);
-        std::fflush(stderr);
-    }
-
     return channel;
 }
 

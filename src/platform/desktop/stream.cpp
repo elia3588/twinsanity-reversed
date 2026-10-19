@@ -3,9 +3,6 @@
 
 #include "sound_internal.h"
 
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
 #include <vector>
 
 // The desktop's side of Platform::Stream: read from disc files on host filesystem
@@ -142,16 +139,7 @@ void ReadSoundBank(s32 channel, u32 bank, s32 file, u32 offset, u32 size)
     if (buffer != nullptr)
     {
         Read(channel, file, offset, size, buffer);
-        // TEMP trace: the bank's own head bytes show whether real ADPCM landed here
-        static u32 reads = 0;
-        if ((bank >= 0x8000 || reads < 3) && reads < 40)
-        {
-            reads++;
-            const u8* head = static_cast<const u8*>(buffer);
-            std::fprintf(stderr, "read s=%u size=%u head=%02X%02X%02X%02X\n", bank, size,
-                         size > 0 ? head[0] : 0, size > 1 ? head[1] : 0, size > 2 ? head[2] : 0, size > 3 ? head[3] : 0);
-            std::fflush(stderr);
-        }
+        DesktopSound::BankLoaded(bank, size);
     }
 }
 
