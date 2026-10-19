@@ -5,12 +5,87 @@
 
 #include "retail/libc.h"
 
+// TEMP debug: an input script for runs the window's own keyboard can't drive ($TWINSANITY_PAD_SEQ "ms:buttons", a step's
+// buttons held for its ms), applied as pad 1's own
+#include <chrono>
+#include <cstdlib>
+#include <vector>
+
 // Minimal desktop pad stub: a single stable pad at port 0, slot 0. It reports the buttons the desktop's own input holds
 // (DesktopWindow::PadButtons), plus the test runs' g_TestPadButtons
 namespace Platform::Pads
 {
 namespace
 {
+// TEMP debug: the input script's steps and where it started
+struct PadStep
+{
+    u32 ms;
+    u32 buttons;
+};
+
+std::vector<PadStep> g_PadScript;
+bool g_PadScriptRead = false;
+std::chrono::steady_clock::time_point g_PadScriptStart;
+
+u32 ScriptedPad()
+{
+    if (!g_PadScriptRead)
+    {
+        g_PadScriptRead = true;
+        g_PadScriptStart = std::chrono::steady_clock::now();
+        const char* sequence = std::getenv("TWINSANITY_PAD_SEQ");
+        if (sequence != nullptr)
+        {
+            const char* at = sequence;
+            while (*at != 0)
+            {
+                char* end = nullptr;
+                unsigned long ms = std::strtoul(at, &end, 0);
+                if (end == at || *end != ':')
+                {
+                    break;
+                }
+
+                at = end + 1;
+                unsigned long buttons = std::strtoul(at, &end, 0);
+                if (end == at)
+                {
+                    break;
+                }
+
+                g_PadScript.push_back({static_cast<u32>(ms), static_cast<u32>(buttons)});
+                if (*end == 0)
+                {
+                    break;
+                }
+
+                at = *end == ',' ? end + 1 : end;
+            }
+        }
+    }
+
+    if (g_PadScript.empty())
+    {
+        return 0;
+    }
+
+    u32 elapsed = static_cast<u32>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
+                                                                                         g_PadScriptStart)
+                                       .count());
+    u32 at = 0;
+    for (const PadStep& step : g_PadScript)
+    {
+        at += step.ms;
+        if (elapsed < at)
+        {
+            return step.buttons;
+        }
+    }
+
+    return g_PadScript.back().buttons;
+}
+
 // The report's pressure bytes of the low byte's buttons and of the directions (bits 12-15), as the PS2's pad layer
 constexpr u32 PressureButtons = 8;
 constexpr u8 ButtonPressures[PressureButtons] = {PressureL2,       PressureR2,     PressureL1,    PressureR1,
@@ -79,7 +154,18 @@ s32 Read(s32 port, s32 slot, u8* data)
         return 0;
     }
 
-    FillReport(data, g_TestPadButtons | DesktopWindow::PadButtons());
+    FillReport(data, g_TestPadButtons | DesktopWindow::PadButtons() | ScriptedPad());
+    // TEMP trace
+    {
+        static u32 lastHeld = 0;
+        u32 heldNow = g_TestPadButtons | DesktopWindow::PadButtons() | ScriptedPad();
+        if (heldNow != lastHeld)
+        {
+            lastHeld = heldNow;
+            std::printf("read held 0x%X\n", heldNow);
+            std::fflush(stdout);
+        }
+    }
     return 1;
 }
 

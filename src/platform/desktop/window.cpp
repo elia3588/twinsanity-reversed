@@ -8,6 +8,8 @@
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
 #include <SDL_opengl.h>
+// TEMP debug: the system's own key state (PollPad)
+#include <windows.h>
 
 namespace
 {
@@ -136,6 +138,16 @@ u32 PollPad()
 {
     const Uint8* keys = SDL_GetKeyboardState(nullptr);
     u32 held = 0;
+    // TEMP debug: the system's own key state, so injected keys land without the window's focus
+    {
+        if ((GetAsyncKeyState(VK_RETURN) & 0x8000) != 0) held |= PadStart;
+        if ((GetAsyncKeyState(VK_DOWN) & 0x8000) != 0) held |= PadDown;
+        if ((GetAsyncKeyState(VK_UP) & 0x8000) != 0) held |= PadUp;
+        if ((GetAsyncKeyState(VK_LEFT) & 0x8000) != 0) held |= PadLeft;
+        if ((GetAsyncKeyState(VK_RIGHT) & 0x8000) != 0) held |= PadRight;
+        if ((GetAsyncKeyState('Z') & 0x8000) != 0) held |= PadCross;
+        if ((GetAsyncKeyState('X') & 0x8000) != 0) held |= PadCircle;
+    }
     if (keys[SDL_SCANCODE_Z] || keys[SDL_SCANCODE_SPACE])
     {
         held |= PadCross;
@@ -360,6 +372,14 @@ bool DesktopWindow::HandleEvents()
     }
 
     g_PadButtons = PollPad();
+    // TEMP trace
+    static u32 lastPad = 0xFFFFFFFF;
+    if (g_PadButtons != lastPad)
+    {
+        lastPad = g_PadButtons;
+        std::fprintf(stderr, "pad 0x%X\n", g_PadButtons);
+        std::fflush(stderr);
+    }
     PollSticks();
     return closed;
 }

@@ -7,8 +7,13 @@ param(
 )
 Add-Type @"
 using System;
+using System.Text;
 using System.Runtime.InteropServices;
 public class Inp {
+    public delegate bool EnumProc(IntPtr h, IntPtr p);
+    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr p);
+    [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);
     [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
@@ -19,9 +24,28 @@ public class Inp {
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
 }
 "@
-$p = Get-Process twinsanity -ErrorAction SilentlyContinue | Select-Object -First 1
-if ($p -eq $null) { Write-Output "no-process"; exit 1 }
-$h = $p.MainWindowHandle
+
+# The game's own window (an SDL window titled "Crash Twinsanity"); the process's MainWindowHandle is the console's, so the
+# title is looked for instead
+function Find-GameWindow {
+    $found = [IntPtr]::Zero
+    $cb = [Inp+EnumProc]{
+        param($h, $p)
+        if (-not [Inp]::IsWindowVisible($h)) { return $true }
+        $sb = New-Object System.Text.StringBuilder 256
+        [Inp]::GetWindowText($h, $sb, 256) | Out-Null
+        if ($sb.ToString() -like "*Crash Twinsanity*") { $script:found = $h; return $false }
+        return $true
+    }
+    [Inp]::EnumWindows($cb, [IntPtr]::Zero) | Out-Null
+    return $script:found
+}
+
+$h = Find-GameWindow
+if ($h -eq [IntPtr]::Zero) {
+    $p = Get-Process twinsanity -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($p -ne $null) { $h = $p.MainWindowHandle }
+}
 if ($h -eq [IntPtr]::Zero) { Write-Output "no-window"; exit 1 }
 [Inp]::ShowWindow($h, 9) | Out-Null
 [Inp]::SetForegroundWindow($h) | Out-Null
