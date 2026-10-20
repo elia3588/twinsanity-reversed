@@ -11,4 +11,15 @@ namespace DesktopSound
 void* BankBuffer(u32 sound, u32 size);
 // The bank read whole: its samples' own end worked out (the block carrying the end flag), the read's padding after it not played
 void BankLoaded(u32 sound, u32 size);
+
+// The movie's own sound (Platform::Movie's player): 16 bit stereo frames at the mixer's own rate (the player resamples the PSS
+// file's PCM to them) played over the voices at the movie's group volume. The mixer (audio.cpp's Mix) reads them; the player sets
+// and clears them through these, which hold the device's lock meanwhile
+void MovieSoundOpen(const s16* frames, u32 count, f32 volume);
+void MovieSoundClose();
+// The mixer's own state, which MovieSoundOpen sets and Mix reads
+extern const s16* MovieFrames;
+extern u32 MovieFrameCount;
+extern u32 MovieFrameRead;
+extern f32 MovieGain;
 }

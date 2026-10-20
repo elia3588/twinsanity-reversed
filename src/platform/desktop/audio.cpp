@@ -505,6 +505,15 @@ void Mix(Uint8* stream, int bytes)
             }
         }
 
+        // The movie's own sound over the voices: the frames the player prepared (Platform::Movie's), one of them a frame, at the
+        // movie's own volume and the game's pause never mind (the movie is what the pause's menus would be over)
+        if (DesktopSound::MovieFrames != nullptr && DesktopSound::MovieFrameRead < DesktopSound::MovieFrameCount)
+        {
+            left += static_cast<f32>(DesktopSound::MovieFrames[DesktopSound::MovieFrameRead * 2]) * DesktopSound::MovieGain;
+            right += static_cast<f32>(DesktopSound::MovieFrames[DesktopSound::MovieFrameRead * 2 + 1]) * DesktopSound::MovieGain;
+            DesktopSound::MovieFrameRead++;
+        }
+
         s32 outLeft = static_cast<s32>(left);
         if (outLeft > 0x7FFF)
         {
@@ -604,6 +613,46 @@ void BankLoaded(u32 sound, u32 size)
     }
 
     (void)size;
+}
+
+// The movie's own sound: the player's frames (stereo, the mixer's own rate) and where they've been read to. Only the player's own
+// thread sets them, which holds the device's lock while it does (the mixer's is SDL's callback thread)
+const s16* MovieFrames = nullptr;
+u32 MovieFrameCount = 0;
+u32 MovieFrameRead = 0;
+f32 MovieGain = 0.0f;
+
+void MovieSoundOpen(const s16* frames, u32 count, f32 volume)
+{
+    if (Platform::Audio::g_Device != 0)
+    {
+        SDL_LockAudioDevice(Platform::Audio::g_Device);
+    }
+
+    MovieFrames = frames;
+    MovieFrameCount = count;
+    MovieFrameRead = 0;
+    MovieGain = volume;
+    if (Platform::Audio::g_Device != 0)
+    {
+        SDL_UnlockAudioDevice(Platform::Audio::g_Device);
+    }
+}
+
+void MovieSoundClose()
+{
+    if (Platform::Audio::g_Device != 0)
+    {
+        SDL_LockAudioDevice(Platform::Audio::g_Device);
+    }
+
+    MovieFrames = nullptr;
+    MovieFrameCount = 0;
+    MovieFrameRead = 0;
+    if (Platform::Audio::g_Device != 0)
+    {
+        SDL_UnlockAudioDevice(Platform::Audio::g_Device);
+    }
 }
 } // namespace DesktopSound
 
